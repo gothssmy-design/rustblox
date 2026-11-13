@@ -3,12 +3,20 @@ use std::sync::Arc;
 use eframe::egui::{self, Color32, CornerRadius, Sense};
 use crate::types::{BgMode, Settings, TextColorMode};
 
+const THEME_PALETTE_KEY: &str = "rustblox_theme_palette";
+
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
     pub bg: Color32,
     pub card_bg: Color32,
     pub surface_bg: Color32,
     pub border: Color32,
+    pub profile_border: Color32,
+    pub profile_card_bg: Color32,
+    pub friends_border: Color32,
+    pub friends_card_bg: Color32,
+    pub games_border: Color32,
+    pub text_border: Color32,
     pub text: Color32,
     pub muted: Color32,
     pub placeholder: Color32,
@@ -19,14 +27,50 @@ pub struct Palette {
     pub widget_hovered: Color32,
 }
 
+fn mix_color(a: Color32, b: [u8; 3], t: f32, alpha: u8) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let inv = 1.0 - t;
+    Color32::from_rgba_unmultiplied(
+        (a.r() as f32 * inv + b[0] as f32 * t).round().clamp(0.0, 255.0) as u8,
+        (a.g() as f32 * inv + b[1] as f32 * t).round().clamp(0.0, 255.0) as u8,
+        (a.b() as f32 * inv + b[2] as f32 * t).round().clamp(0.0, 255.0) as u8,
+        alpha,
+    )
+}
+
+fn tint_card_surface(base_card: Color32, accent_rgb: [u8; 3], dark: bool) -> Color32 {
+    mix_color(
+        base_card,
+        accent_rgb,
+        if dark { 0.16 } else { 0.11 },
+        base_card.a(),
+    )
+}
+
+fn harmonize_auto_border(bg_rgb: [u8; 3], dark: bool) -> Color32 {
+    if dark {
+        mix_color(Color32::from_rgb(bg_rgb[0], bg_rgb[1], bg_rgb[2]), [238, 242, 250], 0.48, 84)
+    } else {
+        mix_color(Color32::from_rgb(bg_rgb[0], bg_rgb[1], bg_rgb[2]), [34, 40, 54], 0.42, 86)
+    }
+}
+
 impl Palette {
     pub fn of(dark: bool) -> Self {
         if dark {
+            let border = Color32::from_rgba_unmultiplied(255, 255, 255, 22);
+            let card_bg = Color32::from_rgb(25, 28, 35);
             Self {
                 bg: Color32::from_rgb(17, 19, 24),
-                card_bg: Color32::from_rgb(25, 28, 35),
+                card_bg,
                 surface_bg: Color32::from_rgb(33, 37, 46),
-                border: Color32::from_rgba_unmultiplied(255, 255, 255, 14),
+                border,
+                profile_border: border,
+                profile_card_bg: card_bg,
+                friends_border: border,
+                friends_card_bg: card_bg,
+                games_border: border,
+                text_border: Color32::from_rgba_unmultiplied(255, 255, 255, 36),
                 text: Color32::from_rgb(240, 242, 245),
                 muted: Color32::from_rgb(156, 163, 175),
                 placeholder: Color32::from_rgb(38, 42, 51),
@@ -37,11 +81,19 @@ impl Palette {
                 widget_hovered: Color32::from_rgb(56, 62, 75),
             }
         } else {
+            let border = Color32::from_rgb(220, 224, 232);
+            let card_bg = Color32::from_rgb(248, 249, 250);
             Self {
                 bg: Color32::from_rgb(255, 255, 255),
-                card_bg: Color32::from_rgb(248, 249, 250),
+                card_bg,
                 surface_bg: Color32::from_rgb(241, 243, 245),
-                border: Color32::from_rgb(225, 228, 232),
+                border,
+                profile_border: border,
+                profile_card_bg: card_bg,
+                friends_border: border,
+                friends_card_bg: card_bg,
+                games_border: border,
+                text_border: Color32::from_rgb(204, 210, 222),
                 text: Color32::from_rgb(25, 25, 25),
                 muted: Color32::from_rgb(96, 97, 98),
                 placeholder: Color32::from_rgb(233, 236, 239),
@@ -53,25 +105,94 @@ impl Palette {
             }
         }
     }
-}
 
-pub fn pal(ui: &egui::Ui) -> Palette {
-    let dark = ui.visuals().dark_mode;
-    let base = Palette::of(dark);
-    if ui.visuals().panel_fill == Color32::TRANSPARENT {
-        let text = ui.visuals().override_text_color.unwrap_or(base.text);
+    pub fn from_settings(settings: &Settings) -> Self {
+        let dark = effective_dark_mode(settings);
+        let text = effective_text_color(settings);
+        let custom_bg = settings.bg_mode != BgMode::ThemeDefault;
         let muted = Color32::from_rgba_unmultiplied(
             text.r(),
             text.g(),
             text.b(),
-            if dark { 216 } else { 194 },
+            if dark { 208 } else { 188 },
         );
-        if dark {
-            Palette {
+
+        let mut p = if !custom_bg {
+            let mut base = Palette::of(dark);
+            base.text = text;
+            base.muted = Color32::from_rgba_unmultiplied(
+                text.r(),
+                text.g(),
+                text.b(),
+                if dark { 185 } else { 172 },
+            );
+            base
+        } else if settings.bg_mode == BgMode::SolidColor {
+            let bg_rgb = settings.bg_color;
+            let (card_bg, surface_bg, extreme_bg, selected_bg, hover_bg, placeholder, widget_inactive, widget_hovered) =
+                if dark {
+                    (
+                        mix_color(Color32::from_rgb(15, 17, 24), bg_rgb, 0.20, 218),
+                        mix_color(Color32::from_rgb(255, 255, 255), bg_rgb, 0.22, 34),
+                        mix_color(Color32::from_rgb(13, 15, 21), bg_rgb, 0.16, 216),
+                        mix_color(Color32::from_rgb(255, 255, 255), bg_rgb, 0.25, 48),
+                        mix_color(Color32::from_rgb(255, 255, 255), bg_rgb, 0.20, 26),
+                        mix_color(Color32::from_rgb(24, 28, 38), bg_rgb, 0.25, 180),
+                        mix_color(Color32::from_rgb(255, 255, 255), bg_rgb, 0.20, 32),
+                        mix_color(Color32::from_rgb(255, 255, 255), bg_rgb, 0.26, 52),
+                    )
+                } else {
+                    (
+                        mix_color(Color32::from_rgb(255, 255, 255), bg_rgb, 0.14, 232),
+                        mix_color(Color32::from_rgb(16, 20, 30), bg_rgb, 0.34, 26),
+                        mix_color(Color32::from_rgb(255, 255, 255), bg_rgb, 0.10, 228),
+                        mix_color(Color32::from_rgb(16, 20, 30), bg_rgb, 0.30, 38),
+                        mix_color(Color32::from_rgb(16, 20, 30), bg_rgb, 0.25, 20),
+                        mix_color(Color32::from_rgb(232, 236, 242), bg_rgb, 0.28, 210),
+                        mix_color(Color32::from_rgb(16, 20, 30), bg_rgb, 0.30, 22),
+                        mix_color(Color32::from_rgb(16, 20, 30), bg_rgb, 0.36, 38),
+                    )
+                };
+            let auto_border = harmonize_auto_border(bg_rgb, dark);
+            Self {
                 bg: Color32::TRANSPARENT,
-                card_bg: Color32::from_rgba_unmultiplied(16, 19, 27, 214),
+                card_bg,
+                surface_bg,
+                border: auto_border,
+                profile_border: auto_border,
+                profile_card_bg: card_bg,
+                friends_border: auto_border,
+                friends_card_bg: card_bg,
+                games_border: auto_border,
+                text_border: mix_color(
+                    auto_border,
+                    if dark { [255, 255, 255] } else { [24, 28, 38] },
+                    0.22,
+                    118,
+                ),
+                text,
+                muted,
+                placeholder,
+                selected_bg,
+                hover_bg,
+                extreme_bg,
+                widget_inactive,
+                widget_hovered,
+            }
+        } else if dark {
+            let border = Color32::from_rgba_unmultiplied(255, 255, 255, 42);
+            let card_bg = Color32::from_rgba_unmultiplied(16, 19, 27, 214);
+            Self {
+                bg: Color32::TRANSPARENT,
+                card_bg,
                 surface_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 28),
-                border: Color32::from_rgba_unmultiplied(255, 255, 255, 36),
+                border,
+                profile_border: border,
+                profile_card_bg: card_bg,
+                friends_border: border,
+                friends_card_bg: card_bg,
+                games_border: border,
+                text_border: Color32::from_rgba_unmultiplied(255, 255, 255, 62),
                 text,
                 muted,
                 placeholder: Color32::from_rgba_unmultiplied(255, 255, 255, 22),
@@ -82,11 +203,19 @@ pub fn pal(ui: &egui::Ui) -> Palette {
                 widget_hovered: Color32::from_rgba_unmultiplied(255, 255, 255, 46),
             }
         } else {
-            Palette {
+            let border = Color32::from_rgba_unmultiplied(16, 19, 26, 42);
+            let card_bg = Color32::from_rgba_unmultiplied(255, 255, 255, 226);
+            Self {
                 bg: Color32::TRANSPARENT,
-                card_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 226),
+                card_bg,
                 surface_bg: Color32::from_rgba_unmultiplied(16, 19, 26, 20),
-                border: Color32::from_rgba_unmultiplied(16, 19, 26, 36),
+                border,
+                profile_border: border,
+                profile_card_bg: card_bg,
+                friends_border: border,
+                friends_card_bg: card_bg,
+                games_border: border,
+                text_border: Color32::from_rgba_unmultiplied(16, 19, 26, 62),
                 text,
                 muted,
                 placeholder: Color32::from_rgba_unmultiplied(16, 19, 26, 22),
@@ -96,10 +225,40 @@ pub fn pal(ui: &egui::Ui) -> Palette {
                 widget_inactive: Color32::from_rgba_unmultiplied(16, 19, 26, 18),
                 widget_hovered: Color32::from_rgba_unmultiplied(16, 19, 26, 34),
             }
+        };
+
+        let to_c32 = |[r, g, b]: [u8; 3]| Color32::from_rgb(r, g, b);
+        if let Some(rgb) = settings.borders_color {
+            let c = to_c32(rgb);
+            p.border = c;
+            p.profile_border = c;
+            p.friends_border = c;
+            p.games_border = c;
+            p.text_border = c;
         }
-    } else {
-        base
+        if let Some(rgb) = settings.profile_color {
+            p.profile_border = to_c32(rgb);
+            p.profile_card_bg = tint_card_surface(p.card_bg, rgb, dark);
+        }
+        if let Some(rgb) = settings.friends_color {
+            p.friends_border = to_c32(rgb);
+            p.friends_card_bg = tint_card_surface(p.card_bg, rgb, dark);
+        }
+        if let Some(rgb) = settings.games_border_color {
+            p.games_border = to_c32(rgb);
+        }
+        if let Some(rgb) = settings.text_border_color {
+            p.text_border = to_c32(rgb);
+        }
+
+        p
     }
+}
+
+pub fn pal(ui: &egui::Ui) -> Palette {
+    ui.ctx()
+        .data(|d| d.get_temp::<Palette>(egui::Id::NULL.with(THEME_PALETTE_KEY)))
+        .unwrap_or_else(|| Palette::of(ui.visuals().dark_mode))
 }
 
 pub const GREEN: Color32 = Color32::from_rgb(0, 176, 111);
@@ -296,12 +455,23 @@ pub fn effective_text_color(settings: &Settings) -> Color32 {
 }
 
 pub fn panel_chrome_fill(ui: &egui::Ui, settings: &Settings) -> Color32 {
-    if settings.bg_mode == BgMode::ThemeDefault {
-        pal(ui).bg
-    } else if effective_dark_mode(settings) {
-        Color32::from_rgba_unmultiplied(15, 18, 24, 194)
-    } else {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 206)
+    let dark = effective_dark_mode(settings);
+    match settings.bg_mode {
+        BgMode::ThemeDefault => pal(ui).bg,
+        BgMode::SolidColor => {
+            if dark {
+                mix_color(Color32::from_rgb(13, 15, 21), settings.bg_color, 0.16, 200)
+            } else {
+                mix_color(Color32::from_rgb(255, 255, 255), settings.bg_color, 0.12, 214)
+            }
+        }
+        BgMode::Wallpaper => {
+            if dark {
+                Color32::from_rgba_unmultiplied(15, 18, 24, 194)
+            } else {
+                Color32::from_rgba_unmultiplied(255, 255, 255, 206)
+            }
+        }
     }
 }
 
@@ -368,8 +538,9 @@ pub fn accent_color(ui: &egui::Ui) -> Color32 {
 pub fn apply_theme(ctx: &egui::Context, settings: &Settings) {
     let dark = effective_dark_mode(settings);
     let custom_bg = settings.bg_mode != BgMode::ThemeDefault;
-    let p = Palette::of(dark);
-    let text_color = effective_text_color(settings);
+    let p = Palette::from_settings(settings);
+    let text_color = p.text;
+    ctx.data_mut(|d| d.insert_temp(egui::Id::NULL.with(THEME_PALETTE_KEY), p));
     let mut v = if dark {
         egui::Visuals::dark()
     } else {
@@ -378,31 +549,15 @@ pub fn apply_theme(ctx: &egui::Context, settings: &Settings) {
     v.panel_fill = if custom_bg { Color32::TRANSPARENT } else { p.bg };
     v.window_fill = if custom_bg {
         if dark {
-            Color32::from_rgba_unmultiplied(20, 24, 32, 244)
+            mix_color(Color32::from_rgb(18, 22, 30), settings.bg_color, 0.14, 244)
         } else {
-            Color32::from_rgba_unmultiplied(252, 253, 255, 246)
+            mix_color(Color32::from_rgb(252, 253, 255), settings.bg_color, 0.08, 246)
         }
     } else {
         p.bg
     };
-    v.extreme_bg_color = if custom_bg {
-        if dark {
-            Color32::from_rgba_unmultiplied(14, 17, 24, 210)
-        } else {
-            Color32::from_rgba_unmultiplied(255, 255, 255, 220)
-        }
-    } else {
-        p.extreme_bg
-    };
-    v.faint_bg_color = if custom_bg {
-        if dark {
-            Color32::from_rgba_unmultiplied(16, 19, 27, 214)
-        } else {
-            Color32::from_rgba_unmultiplied(255, 255, 255, 226)
-        }
-    } else {
-        p.card_bg
-    };
+    v.extreme_bg_color = p.extreme_bg;
+    v.faint_bg_color = p.card_bg;
     v.override_text_color = Some(text_color);
     v.text_options.font_hinting = true;
     v.text_options.subpixel_binning = false;
@@ -413,35 +568,23 @@ pub fn apply_theme(ctx: &egui::Context, settings: &Settings) {
     v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, p.border);
     v.widgets.noninteractive.corner_radius = r8;
     v.widgets.noninteractive.fg_stroke.color = text_color;
-    v.widgets.inactive.weak_bg_fill = if custom_bg {
-        if dark {
-            Color32::from_rgba_unmultiplied(255, 255, 255, 28)
-        } else {
-            Color32::from_rgba_unmultiplied(16, 19, 26, 20)
-        }
+    v.widgets.inactive.weak_bg_fill = p.widget_inactive;
+    v.widgets.inactive.bg_fill = p.widget_inactive;
+    v.widgets.inactive.bg_stroke = if settings.text_border_color.is_some() {
+        egui::Stroke::new(1.0, p.text_border)
     } else {
-        p.widget_inactive
+        egui::Stroke::NONE
     };
-    v.widgets.inactive.bg_fill = v.widgets.inactive.weak_bg_fill;
-    v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
     v.widgets.inactive.corner_radius = r8;
     v.widgets.inactive.fg_stroke.color = text_color;
-    v.widgets.hovered.weak_bg_fill = if custom_bg {
-        if dark {
-            Color32::from_rgba_unmultiplied(255, 255, 255, 46)
-        } else {
-            Color32::from_rgba_unmultiplied(16, 19, 26, 36)
-        }
-    } else {
-        p.widget_hovered
-    };
-    v.widgets.hovered.bg_fill = v.widgets.hovered.weak_bg_fill;
+    v.widgets.hovered.weak_bg_fill = p.widget_hovered;
+    v.widgets.hovered.bg_fill = p.widget_hovered;
     v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, p.border);
     v.widgets.hovered.corner_radius = r8;
     v.widgets.hovered.fg_stroke.color = text_color;
     v.widgets.active.weak_bg_fill = p.selected_bg;
     v.widgets.active.bg_fill = p.selected_bg;
-    v.widgets.active.bg_stroke = egui::Stroke::new(1.0, p.border);
+    v.widgets.active.bg_stroke = egui::Stroke::new(1.2, p.text_border);
     v.widgets.active.corner_radius = r8;
     v.widgets.active.fg_stroke.color = text_color;
     v.widgets.open.corner_radius = r8;
@@ -463,26 +606,24 @@ pub fn apply_theme(ctx: &egui::Context, settings: &Settings) {
     });
 }
 
-pub fn card_frame(ui: &egui::Ui, margin: i8) -> egui::Frame {
-    let p = pal(ui);
-    let custom_bg = ui.visuals().panel_fill == Color32::TRANSPARENT;
-    let fill = ui.visuals().faint_bg_color;
-    let stroke_color = if custom_bg && ui.visuals().dark_mode {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 28)
-    } else {
-        p.border
-    };
+pub fn card_frame_colored(margin: i8, fill: Color32, border: Color32) -> egui::Frame {
     egui::Frame::new()
         .fill(fill)
-        .stroke(egui::Stroke::new(1.0, stroke_color))
+        .stroke(egui::Stroke::new(1.0, border))
         .corner_radius(12)
         .inner_margin(margin)
 }
 
+pub fn card_frame(ui: &egui::Ui, margin: i8) -> egui::Frame {
+    let p = pal(ui);
+    card_frame_colored(margin, p.card_bg, p.border)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{is_dark_color, theme_accent, GREEN, BLUE};
+    use super::{is_dark_color, theme_accent, Palette, BLUE, GREEN};
     use crate::types::{BgMode, Settings};
+    use eframe::egui::Color32;
 
     #[test]
     fn detects_rose_and_light_dark_contrast_correctly() {
@@ -510,5 +651,26 @@ mod tests {
         s.bg_color = [184, 50, 95]; // rose theme -> red-dominant accent
         let rose_accent = theme_accent(&s);
         assert!(rose_accent.r() > rose_accent.g() && rose_accent.r() > rose_accent.b());
+    }
+
+    #[test]
+    fn custom_borders_and_harmonized_background_apply_cleanly() {
+        let mut s = Settings::default();
+        s.bg_mode = BgMode::SolidColor;
+        s.bg_color = [184, 50, 95];
+        s.borders_color = Some([240, 210, 220]);
+        s.profile_color = Some([255, 130, 175]);
+        s.friends_color = Some([110, 220, 170]);
+        s.games_border_color = Some([120, 185, 255]);
+        s.text_border_color = Some([255, 235, 130]);
+
+        let p = Palette::from_settings(&s);
+        assert_eq!(p.border, Color32::from_rgb(240, 210, 220));
+        assert_eq!(p.profile_border, Color32::from_rgb(255, 130, 175));
+        assert_eq!(p.friends_border, Color32::from_rgb(110, 220, 170));
+        assert_eq!(p.games_border, Color32::from_rgb(120, 185, 255));
+        assert_eq!(p.text_border, Color32::from_rgb(255, 235, 130));
+        // Card surface should pick up warm rose harmony
+        assert!(p.card_bg.r() > p.card_bg.g());
     }
 }

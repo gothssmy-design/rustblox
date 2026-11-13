@@ -122,6 +122,11 @@ pub struct RustBlox {
     pub avatar_outfits_more: bool,
     pub avatar_outfits_loading: bool,
     pub avatar_outfits_err: Option<String>,
+    pub avatar_body_part_filter: BodyPartFilter,
+    pub avatar_outfit_filter: OutfitFilter,
+    pub avatar_save_outfit_open: bool,
+    pub avatar_save_outfit_name: String,
+    pub avatar_outfit_saving: bool,
     pub avatar_3d: Avatar3DState,
 
     pub game_tab: GameTab,
@@ -256,6 +261,11 @@ impl RustBlox {
             avatar_outfits_more: false,
             avatar_outfits_loading: false,
             avatar_outfits_err: None,
+            avatar_body_part_filter: BodyPartFilter::All,
+            avatar_outfit_filter: OutfitFilter::All,
+            avatar_save_outfit_open: false,
+            avatar_save_outfit_name: String::new(),
+            avatar_outfit_saving: false,
             avatar_3d: Avatar3DState::default(),
             game_tab: GameTab::About,
             game_extra: None,
@@ -715,6 +725,11 @@ impl RustBlox {
         self.avatar_outfits_more = false;
         self.avatar_outfits_loading = false;
         self.avatar_outfits_err = None;
+        self.avatar_body_part_filter = BodyPartFilter::All;
+        self.avatar_outfit_filter = OutfitFilter::All;
+        self.avatar_save_outfit_open = false;
+        self.avatar_save_outfit_name.clear();
+        self.avatar_outfit_saving = false;
         self.avatar_3d = Avatar3DState::default();
         self.game_tab = GameTab::About;
         self.game_extra = None;
@@ -1305,6 +1320,27 @@ impl RustBlox {
                         }
                         Err(e) => {
                             self.avatar_outfits_err = Some(e);
+                        }
+                    }
+                }
+                Msg::OutfitActionDone(r) => {
+                    if !logged_in {
+                        continue;
+                    }
+                    self.avatar_outfit_saving = false;
+                    match r {
+                        Ok(msg) => {
+                            self.status = msg;
+                            self.avatar_err = None;
+                            self.avatar_save_outfit_open = false;
+                            self.avatar_save_outfit_name.clear();
+                            self.avatar_outfits = None;
+                            self.avatar_outfits_page = 1;
+                            self.avatar_outfits_more = false;
+                            self.load_avatar_tab(AvatarTab::Outfits, false);
+                        }
+                        Err(e) => {
+                            self.avatar_err = Some(e);
                         }
                     }
                 }
@@ -1941,6 +1977,10 @@ impl eframe::App for RustBlox {
                     if nav_item(ui, NavIcon::Settings, "Settings", matches!(page, Page::Settings)) {
                         acts.push(Action::Go(Page::Settings));
                     }
+                    ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                        ui.add_space(6.0);
+                        crate::telemetry::draw_sidebar_telemetry(ui);
+                    });
                 });
         }
 
@@ -1978,6 +2018,7 @@ impl eframe::App for RustBlox {
 
                         egui::Frame::new()
                             .fill(p.surface_bg)
+                            .stroke(egui::Stroke::new(1.2, p.text_border))
                             .corner_radius(18)
                             .inner_margin(egui::Margin::symmetric(14, 6))
                             .show(ui, |ui| {
@@ -2421,6 +2462,34 @@ impl eframe::App for RustBlox {
                         self.spawn(move || {
                             Msg::AvatarApplied(seq, apply_wear_outfit(uid, &cookie, &outfit))
                         });
+                    }
+                }
+                Action::SaveOutfit(name) => {
+                    if let Some(cookie) = self.cookie.clone() {
+                        if !self.avatar_outfit_saving {
+                            self.avatar_err = None;
+                            self.avatar_outfit_saving = true;
+                            self.status = format!("Saving outfit \"{}\"...", name.trim());
+                            let state = self.avatar_state.clone();
+                            let palette = self.avatar_palette.clone();
+                            self.spawn(move || {
+                                Msg::OutfitActionDone(create_avatar_outfit(
+                                    &cookie, &name, state, &palette,
+                                ))
+                            });
+                        }
+                    }
+                }
+                Action::DeleteOutfit(outfit) => {
+                    if let Some(cookie) = self.cookie.clone() {
+                        if !self.avatar_outfit_saving {
+                            self.avatar_err = None;
+                            self.avatar_outfit_saving = true;
+                            self.status = format!("Deleting outfit \"{}\"...", outfit.name);
+                            self.spawn(move || {
+                                Msg::OutfitActionDone(delete_avatar_outfit(&cookie, &outfit))
+                            });
+                        }
                     }
                 }
                 Action::SetAvatarType(rig) => {

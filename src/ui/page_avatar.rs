@@ -2,8 +2,10 @@
 use eframe::egui::{self, Color32, CornerRadius, Sense, RichText};
 use crate::app::RustBlox;
 use crate::avatar_3d::render_avatar_viewport;
-use crate::theme::{accent_color, pal, GREEN, RED};
-use crate::types::{Action, AvatarAsset, AvatarTab, BodyColorTarget, OutfitItem};
+use crate::theme::{accent_color, is_dark_color, pal, GREEN, RED};
+use crate::types::{
+    Action, AvatarAsset, AvatarTab, BodyColorTarget, BodyPartFilter, OutfitFilter, OutfitItem,
+};
 use crate::ui::widgets::*;
 
 fn avatar_assets_grid(
@@ -270,6 +272,12 @@ impl RustBlox {
                                 );
                             }
 
+                            let accent = accent_color(ui);
+                            let accent_fg = if is_dark_color([accent.r(), accent.g(), accent.b()]) {
+                                Color32::WHITE
+                            } else {
+                                Color32::from_rgb(16, 19, 26)
+                            };
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 let reload_btn = egui::Button::new("Reload")
                                     .fill(pedestal_fill)
@@ -279,8 +287,126 @@ impl RustBlox {
                                     acts.push(Action::RefreshAvatar);
                                     acts.push(Action::RefreshAvatarTab(current_tab));
                                 }
+
+                                ui.add_space(4.0);
+                                let save_open = self.avatar_save_outfit_open;
+                                let save_btn = egui::Button::new(
+                                    RichText::new("+ Save Outfit")
+                                        .size(12.0)
+                                        .strong()
+                                        .color(if save_open { accent_fg } else { pal_colors.text }),
+                                )
+                                .fill(if save_open { accent } else { pedestal_fill })
+                                .stroke(egui::Stroke::new(
+                                    1.0,
+                                    if save_open { accent } else { pal_colors.border },
+                                ))
+                                .corner_radius(8);
+                                if ui
+                                    .add(save_btn)
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .on_hover_text("Save your currently worn look as a Roblox outfit")
+                                    .clicked()
+                                {
+                                    self.avatar_save_outfit_open = !self.avatar_save_outfit_open;
+                                }
                             });
                         });
+
+                        if self.avatar_save_outfit_open {
+                            let accent = accent_color(ui);
+                            let accent_fg = if is_dark_color([accent.r(), accent.g(), accent.b()]) {
+                                Color32::WHITE
+                            } else {
+                                Color32::from_rgb(16, 19, 26)
+                            };
+                            ui.add_space(8.0);
+                            egui::Frame::new()
+                                .fill(pedestal_fill)
+                                .stroke(egui::Stroke::new(1.2, accent))
+                                .corner_radius(10)
+                                .inner_margin(egui::Margin::symmetric(10, 7))
+                                .show(ui, |ui| {
+                                    ui.set_width((inner_w - 22.0).max(200.0));
+                                    let mut submit_save = false;
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 8.0;
+                                        ui.label(
+                                            RichText::new("Outfit Name:")
+                                                .size(12.0)
+                                                .strong()
+                                                .color(pal_colors.text),
+                                        );
+                                        let edit_w = (ui.available_width() - 165.0).max(110.0);
+                                        egui::Frame::new()
+                                            .fill(pal_colors.surface_bg)
+                                            .stroke(egui::Stroke::new(1.0, pal_colors.text_border))
+                                            .corner_radius(8)
+                                            .inner_margin(egui::Margin::symmetric(8, 5))
+                                            .show(ui, |ui| {
+                                                let resp = ui.add(
+                                                    egui::TextEdit::singleline(
+                                                        &mut self.avatar_save_outfit_name,
+                                                    )
+                                                    .frame(egui::Frame::NONE)
+                                                    .hint_text("e.g. Cozy Streetwear...")
+                                                    .desired_width(edit_w),
+                                                );
+                                                if resp.lost_focus()
+                                                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                                {
+                                                    submit_save = true;
+                                                }
+                                            });
+
+                                        let can_save = !self.avatar_outfit_saving
+                                            && !self.avatar_save_outfit_name.trim().is_empty();
+                                        let confirm_btn = egui::Button::new(
+                                            RichText::new(if self.avatar_outfit_saving {
+                                                "Saving..."
+                                            } else {
+                                                "Save"
+                                            })
+                                            .size(12.0)
+                                            .strong()
+                                            .color(if can_save {
+                                                accent_fg
+                                            } else {
+                                                pal_colors.muted
+                                            }),
+                                        )
+                                        .fill(if can_save { accent } else { pal_colors.surface_bg })
+                                        .corner_radius(8)
+                                        .min_size(egui::vec2(66.0, 26.0));
+                                        if ui.add_enabled(can_save, confirm_btn).clicked() {
+                                            submit_save = true;
+                                        }
+
+                                        let cancel_btn = egui::Button::new(
+                                            RichText::new("Cancel").size(12.0).color(pal_colors.muted),
+                                        )
+                                        .fill(Color32::TRANSPARENT)
+                                        .stroke(egui::Stroke::new(1.0, pal_colors.border))
+                                        .corner_radius(8)
+                                        .min_size(egui::vec2(58.0, 26.0));
+                                        if ui
+                                            .add_enabled(!self.avatar_outfit_saving, cancel_btn)
+                                            .clicked()
+                                        {
+                                            self.avatar_save_outfit_open = false;
+                                        }
+                                    });
+                                    if submit_save
+                                        && !self.avatar_outfit_saving
+                                        && !self.avatar_save_outfit_name.trim().is_empty()
+                                    {
+                                        acts.push(Action::SaveOutfit(
+                                            self.avatar_save_outfit_name.clone(),
+                                        ));
+                                    }
+                                });
+                        }
+
                         ui.add_space(10.0);
                         ui.separator();
                         ui.add_space(10.0);
@@ -292,10 +418,16 @@ impl RustBlox {
                             .unwrap_or(0);
                         let cat_w = 152.0;
                         let content_w = (inner_w - cat_w - 18.0).max(200.0);
+                        let has_subpills = matches!(
+                            current_tab,
+                            AvatarTab::Outfits | AvatarTab::BodyParts
+                        );
+                        let extra_top = (if self.avatar_save_outfit_open { 50.0 } else { 0.0 })
+                            + (if has_subpills { 34.0 } else { 0.0 });
                         let grid_scroll_h = if matches!(current_tab, AvatarTab::Body) {
-                            (win_h - 175.0).max(400.0)
+                            (win_h - 175.0 - extra_top).max(360.0)
                         } else {
-                            (win_h - 220.0).max(380.0)
+                            (win_h - 220.0 - extra_top).max(330.0)
                         };
 
                         ui.horizontal_top(|ui| {
@@ -371,7 +503,7 @@ impl RustBlox {
                                             let bar_w = (content_w - extra_w).max(140.0);
                                             egui::Frame::new()
                                                 .fill(pedestal_fill)
-                                                .stroke(egui::Stroke::new(1.0, pal_colors.border))
+                                                .stroke(egui::Stroke::new(1.2, pal_colors.text_border))
                                                 .corner_radius(14)
                                                 .inner_margin(egui::Margin::symmetric(12, 6))
                                                 .show(ui, |ui| {
@@ -400,7 +532,7 @@ impl RustBlox {
                                                             && ui
                                                                 .add(
                                                                     egui::Label::new(
-                                                                        RichText::new("âœ•")
+                                                                        RichText::new("\u{00D7}")
                                                                             .size(12.0)
                                                                             .color(
                                                                                 pal_colors.muted,
@@ -430,7 +562,100 @@ impl RustBlox {
                                                 }
                                             }
                                         });
-                                        ui.add_space(10.0);
+                                        ui.add_space(8.0);
+                                    }
+
+                                    if current_tab == AvatarTab::Outfits {
+                                        let accent = accent_color(ui);
+                                        let accent_fg = if is_dark_color([accent.r(), accent.g(), accent.b()]) {
+                                            Color32::WHITE
+                                        } else {
+                                            Color32::from_rgb(16, 19, 26)
+                                        };
+                                        let (total_c, saved_c, char_c) = self
+                                            .avatar_outfits
+                                            .as_ref()
+                                            .map(|list| {
+                                                let s = list.iter().filter(|o| o.is_editable).count();
+                                                (list.len(), s, list.len().saturating_sub(s))
+                                            })
+                                            .unwrap_or((0, 0, 0));
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 6.0;
+                                            for opt in OutfitFilter::ALL {
+                                                let sel = self.avatar_outfit_filter == opt;
+                                                let count = match opt {
+                                                    OutfitFilter::All => total_c,
+                                                    OutfitFilter::Saved => saved_c,
+                                                    OutfitFilter::Characters => char_c,
+                                                };
+                                                let label = if total_c > 0 {
+                                                    format!("{} ({count})", opt.label())
+                                                } else {
+                                                    opt.label().to_string()
+                                                };
+                                                let pill = egui::Button::new(
+                                                    RichText::new(label).size(11.5).strong().color(
+                                                        if sel { accent_fg } else { pal_colors.text },
+                                                    ),
+                                                )
+                                                .fill(if sel { accent } else { pedestal_fill })
+                                                .stroke(egui::Stroke::new(
+                                                    1.0,
+                                                    if sel { accent } else { pal_colors.border },
+                                                ))
+                                                .corner_radius(12)
+                                                .min_size(egui::vec2(0.0, 24.0));
+                                                if ui
+                                                    .add(pill)
+                                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                                    .clicked()
+                                                {
+                                                    self.avatar_outfit_filter = opt;
+                                                }
+                                            }
+                                        });
+                                        ui.add_space(8.0);
+                                    } else if current_tab == AvatarTab::BodyParts {
+                                        let accent = accent_color(ui);
+                                        let accent_fg = if is_dark_color([accent.r(), accent.g(), accent.b()]) {
+                                            Color32::WHITE
+                                        } else {
+                                            Color32::from_rgb(16, 19, 26)
+                                        };
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = egui::vec2(5.0, 4.0);
+                                            for part in BodyPartFilter::ALL {
+                                                let sel = self.avatar_body_part_filter == part;
+                                                let pill = egui::Button::new(
+                                                    RichText::new(part.label())
+                                                        .size(11.5)
+                                                        .strong()
+                                                        .color(if sel {
+                                                            accent_fg
+                                                        } else {
+                                                            pal_colors.text
+                                                        }),
+                                                )
+                                                .fill(if sel { accent } else { pedestal_fill })
+                                                .stroke(egui::Stroke::new(
+                                                    1.0,
+                                                    if sel { accent } else { pal_colors.border },
+                                                ))
+                                                .corner_radius(12)
+                                                .min_size(egui::vec2(0.0, 24.0));
+                                                if ui
+                                                    .add(pill)
+                                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                                    .clicked()
+                                                {
+                                                    self.avatar_body_part_filter = part;
+                                                }
+                                            }
+                                        });
+                                        ui.add_space(8.0);
+                                    } else if !matches!(current_tab, AvatarTab::Body) {
+                                        ui.add_space(2.0);
                                     }
 
                                     let filter = self.avatar_search.trim().to_lowercase();
@@ -490,17 +715,28 @@ impl RustBlox {
                                                 format!("Could not load outfits: {err}"),
                                             );
                                         } else if let Some(outfits) = &self.avatar_outfits {
+                                            let accent = accent_color(ui);
                                             let filtered: Vec<&OutfitItem> = outfits
                                                 .iter()
                                                 .filter(|o| {
-                                                    filter.is_empty()
-                                                        || o.name.to_lowercase().contains(&filter)
+                                                    let kind_ok = match self.avatar_outfit_filter {
+                                                        OutfitFilter::All => true,
+                                                        OutfitFilter::Saved => o.is_editable,
+                                                        OutfitFilter::Characters => !o.is_editable,
+                                                    };
+                                                    let name_ok = filter.is_empty()
+                                                        || o.name.to_lowercase().contains(&filter);
+                                                    kind_ok && name_ok
                                                 })
                                                 .collect();
                                             if filtered.is_empty() && !self.avatar_outfits_loading {
+                                                let msg = if self.avatar_outfit_filter == OutfitFilter::Saved && filter.is_empty() {
+                                                    "No custom saved outfits yet — click \"+ Save Outfit\" above to save your current look!"
+                                                } else {
+                                                    "No outfits match this filter."
+                                                };
                                                 ui.label(
-                                                    RichText::new("No saved outfits found.")
-                                                        .color(pal_colors.muted),
+                                                    RichText::new(msg).color(pal_colors.muted),
                                                 );
                                             } else if !filtered.is_empty() {
                                                 let avail = (ui.available_width() - 16.0).max(200.0);
@@ -516,6 +752,7 @@ impl RustBlox {
                                                         ui.spacing_mut().item_spacing.x = gap;
                                                         for outfit in row {
                                                             let mut clicked = false;
+                                                            let mut delete_clicked = false;
                                                             let frame_res = egui::Frame::new()
                                                                 .fill(pedestal_fill)
                                                                 .stroke(egui::Stroke::NONE)
@@ -537,6 +774,36 @@ impl RustBlox {
                                                                         if pic.clicked() {
                                                                             clicked = true;
                                                                         }
+                                                                        if outfit.is_editable {
+                                                                            let del_rect = egui::Rect::from_min_size(
+                                                                                egui::pos2(pic.rect.right() - 24.0, pic.rect.top() + 5.0),
+                                                                                egui::vec2(19.0, 19.0),
+                                                                            );
+                                                                            let del_resp = ui
+                                                                                .interact(
+                                                                                    del_rect,
+                                                                                    ui.scope_id().with(("del_outfit", outfit.id)),
+                                                                                    Sense::click(),
+                                                                                )
+                                                                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                                                                .on_hover_text(format!("Delete saved outfit \"{}\"", outfit.name));
+                                                                            let del_bg = if del_resp.hovered() {
+                                                                                RED
+                                                                            } else {
+                                                                                Color32::from_black_alpha(155)
+                                                                            };
+                                                                            ui.painter().rect_filled(del_rect, CornerRadius::same(6), del_bg);
+                                                                            ui.painter().text(
+                                                                                del_rect.center(),
+                                                                                egui::Align2::CENTER_CENTER,
+                                                                                "\u{00D7}",
+                                                                                egui::FontId::proportional(13.0),
+                                                                                Color32::WHITE,
+                                                                            );
+                                                                            if del_resp.clicked() {
+                                                                                delete_clicked = true;
+                                                                            }
+                                                                        }
                                                                         ui.add_space(8.0);
                                                                         ui.add_sized(
                                                                             [thumb_s, 20.0],
@@ -550,17 +817,27 @@ impl RustBlox {
                                                                         .on_hover_text(&outfit.name);
                                                                         ui.add_space(4.0);
                                                                         ui.label(
-                                                                            RichText::new("Outfit")
-                                                                                .size(11.0)
-                                                                                .color(pal_colors.muted),
+                                                                            RichText::new(if outfit.is_editable {
+                                                                                "Saved Outfit"
+                                                                            } else {
+                                                                                "Character"
+                                                                            })
+                                                                            .size(11.0)
+                                                                            .color(if outfit.is_editable {
+                                                                                accent
+                                                                            } else {
+                                                                                pal_colors.muted
+                                                                            }),
                                                                         );
                                                                     });
                                                                 });
                                                             let resp = frame_res.response.interact(egui::Sense::click());
-                                                            if resp.clicked() || clicked {
+                                                            if delete_clicked {
+                                                                acts.push(Action::DeleteOutfit((*outfit).clone()));
+                                                            } else if resp.clicked() || clicked {
                                                                 acts.push(Action::WearOutfit((*outfit).clone()));
                                                             }
-                                                            if resp.hovered() {
+                                                            if resp.hovered() && !delete_clicked {
                                                                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                                             }
                                                             resp.on_hover_text(format!("Click to wear outfit \"{}\"", outfit.name));
@@ -821,11 +1098,17 @@ impl RustBlox {
                                             let filtered: Vec<AvatarAsset> = list
                                                 .iter()
                                                 .filter(|a| {
-                                                    filter.is_empty()
+                                                    let part_ok = if tab == AvatarTab::BodyParts {
+                                                        self.avatar_body_part_filter.matches(a)
+                                                    } else {
+                                                        true
+                                                    };
+                                                    let text_ok = filter.is_empty()
                                                         || a.name.to_lowercase().contains(&filter)
                                                         || a.asset_type_name
                                                             .to_lowercase()
-                                                            .contains(&filter)
+                                                            .contains(&filter);
+                                                    part_ok && text_ok
                                                 })
                                                 .cloned()
                                                 .collect();

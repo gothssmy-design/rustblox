@@ -2,7 +2,9 @@
 
 use crate::app::RustBlox;
 use crate::avatar_3d::render_avatar_viewport;
-use crate::theme::{card_frame, compact, pal, BLUE, GREEN, ORANGE, RED};
+use crate::theme::{
+    accent_color, card_frame_colored, compact, pal, BLUE, GREEN, ORANGE, RED,
+};
 use crate::types::{Action, FriendProfile, Page, User};
 use crate::ui::widgets::*;
 
@@ -58,7 +60,7 @@ impl RustBlox {
         acts: &mut Vec<Action>,
     ) {
         let p = pal(ui);
-        card_frame(ui, 20).show(ui, |ui| {
+        card_frame_colored(20, p.profile_card_bg, p.profile_border).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 22.0;
@@ -130,7 +132,7 @@ impl RustBlox {
                         ] {
                             egui::Frame::new()
                                 .fill(p.surface_bg)
-                                .stroke(egui::Stroke::new(1.0, p.border))
+                                .stroke(egui::Stroke::new(1.0, p.profile_border))
                                 .corner_radius(10)
                                 .inner_margin(egui::Margin::symmetric(12, 6))
                                 .show(ui, |ui| {
@@ -159,7 +161,7 @@ impl RustBlox {
                     ui.add_space(2.0);
                     let div_rect = ui.allocate_space(egui::vec2(ui.available_width(), 1.0)).1;
                     ui.painter()
-                        .rect_filled(div_rect, 0.0, p.border.linear_multiply(0.75));
+                        .rect_filled(div_rect, 0.0, p.profile_border.linear_multiply(0.75));
                     ui.add_space(2.0);
 
                     self.render_profile_bio(ui, profile, is_self, acts);
@@ -182,7 +184,7 @@ impl RustBlox {
             outer_rect,
             CornerRadius::same(14),
             p.surface_bg,
-            egui::Stroke::new(1.0, p.border),
+            egui::Stroke::new(1.0, p.profile_border),
             egui::StrokeKind::Inside,
         );
 
@@ -235,8 +237,8 @@ impl RustBlox {
                 "Switch to interactive 3D avatar"
             };
             let btn = egui::Button::new(RichText::new(label).size(11.0).strong().color(p.text))
-                .fill(p.card_bg)
-                .stroke(egui::Stroke::new(1.0, p.border))
+                .fill(p.profile_card_bg)
+                .stroke(egui::Stroke::new(1.0, p.profile_border))
                 .corner_radius(11);
             if overlay
                 .add_sized(toggle_rect.size(), btn)
@@ -434,12 +436,20 @@ impl RustBlox {
         let p = pal(ui);
         if self.profile_editing && is_self {
             ui.vertical(|ui| {
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.profile_edit_bio)
-                        .desired_width(ui.available_width())
-                        .desired_rows(3)
-                        .hint_text("Write something about yourself..."),
-                );
+                egui::Frame::new()
+                    .fill(p.surface_bg)
+                    .stroke(egui::Stroke::new(1.2, p.text_border))
+                    .corner_radius(8)
+                    .inner_margin(egui::Margin::symmetric(10, 8))
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.profile_edit_bio)
+                                .frame(egui::Frame::NONE)
+                                .desired_width(ui.available_width())
+                                .desired_rows(3)
+                                .hint_text("Write something about yourself..."),
+                        );
+                    });
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     let save_label = if self.profile_saving_bio {
@@ -546,7 +556,7 @@ impl RustBlox {
         });
         ui.add_space(6.0);
 
-        card_frame(ui, 14).show(ui, |ui| {
+        card_frame_colored(14, p.profile_card_bg, p.profile_border).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 16.0;
@@ -641,7 +651,7 @@ impl RustBlox {
         ui.add_space(8.0);
 
         if profile.currently_wearing.is_empty() {
-            card_frame(ui, 16).show(ui, |ui| {
+            card_frame_colored(16, p.profile_card_bg, p.profile_border).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(
                     RichText::new("Not wearing any visible items.")
@@ -662,11 +672,15 @@ impl RustBlox {
                         let (card_rect, resp) = ui.allocate_exact_size(card_size, Sense::click());
                         let hovered = resp.hovered();
 
-                        let border_color = if hovered { BLUE } else { p.border };
+                        let border_color = if hovered {
+                            accent_color(ui)
+                        } else {
+                            p.profile_border
+                        };
                         ui.painter().rect(
                             card_rect,
                             CornerRadius::same(12),
-                            p.card_bg,
+                            p.profile_card_bg,
                             egui::Stroke::new(if hovered { 1.5 } else { 1.0 }, border_color),
                             egui::StrokeKind::Inside,
                         );
@@ -894,7 +908,7 @@ fn render_presence_pill(ui: &mut egui::Ui, profile: &FriendProfile) {
 
     egui::Frame::new()
         .fill(p.surface_bg)
-        .stroke(egui::Stroke::new(1.0, p.border))
+        .stroke(egui::Stroke::new(1.0, p.profile_border))
         .corner_radius(10)
         .inner_margin(egui::Margin::symmetric(8, 3))
         .show(ui, |ui| {

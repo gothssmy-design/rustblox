@@ -31,6 +31,11 @@ pub struct Settings {
     pub bg_wallpaper: String,
     pub bg_overlay: f32,
     pub text_mode: TextColorMode,
+    pub borders_color: Option<[u8; 3]>,
+    pub profile_color: Option<[u8; 3]>,
+    pub friends_color: Option<[u8; 3]>,
+    pub games_border_color: Option<[u8; 3]>,
+    pub text_border_color: Option<[u8; 3]>,
     pub target_fps: Option<u32>,
     pub auto_close_roblox: bool,
 }
@@ -44,6 +49,11 @@ impl Default for Settings {
             bg_wallpaper: String::new(),
             bg_overlay: 0.42,
             text_mode: TextColorMode::Auto,
+            borders_color: None,
+            profile_color: None,
+            friends_color: None,
+            games_border_color: None,
+            text_border_color: None,
             target_fps: None,
             auto_close_roblox: true,
         }
@@ -224,6 +234,7 @@ pub struct OutfitItem {
     pub id: u64,
     pub name: String,
     pub thumb: String,
+    pub is_editable: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -252,12 +263,13 @@ pub enum AvatarTab {
     TShirts,
     Layered,
     Faces,
+    BodyParts,
     Animations,
     Body,
 }
 
 impl AvatarTab {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Wearing,
         Self::Outfits,
         Self::Accessories,
@@ -267,6 +279,7 @@ impl AvatarTab {
         Self::TShirts,
         Self::Layered,
         Self::Faces,
+        Self::BodyParts,
         Self::Animations,
         Self::Body,
     ];
@@ -282,6 +295,7 @@ impl AvatarTab {
             Self::TShirts => "T-Shirts",
             Self::Layered => "Layered",
             Self::Faces => "Faces & Heads",
+            Self::BodyParts => "Body Parts",
             Self::Animations => "Animations",
             Self::Body => "Body & Skin",
         }
@@ -300,10 +314,79 @@ impl AvatarTab {
                 "ShirtAccessory,TShirtAccessory,PantsAccessory,JacketAccessory,SweaterAccessory,ShortsAccessory,LeftShoeAccessory,RightShoeAccessory,DressSkirtAccessory",
             ),
             Self::Faces => Some("Face,DynamicHead"),
+            Self::BodyParts => Some("Head,DynamicHead,Torso,LeftArm,RightArm,LeftLeg,RightLeg"),
             Self::Animations => Some(
                 "IdleAnimation,WalkAnimation,RunAnimation,JumpAnimation,FallAnimation,ClimbAnimation,SwimAnimation",
             ),
             Self::Wearing | Self::Outfits | Self::Body => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodyPartFilter {
+    All,
+    Head,
+    Torso,
+    LeftArm,
+    RightArm,
+    LeftLeg,
+    RightLeg,
+}
+
+impl BodyPartFilter {
+    pub const ALL: [Self; 7] = [
+        Self::All,
+        Self::Head,
+        Self::Torso,
+        Self::LeftArm,
+        Self::RightArm,
+        Self::LeftLeg,
+        Self::RightLeg,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Head => "Heads",
+            Self::Torso => "Torsos",
+            Self::LeftArm => "L Arms",
+            Self::RightArm => "R Arms",
+            Self::LeftLeg => "L Legs",
+            Self::RightLeg => "R Legs",
+        }
+    }
+
+    pub fn matches(self, asset: &AvatarAsset) -> bool {
+        let tid = asset.asset_type_id;
+        let tname = asset.asset_type_name.as_str();
+        match self {
+            Self::All => true,
+            Self::Head => matches!(tid, 17 | 79) || tname == "Head" || tname == "DynamicHead",
+            Self::Torso => tid == 27 || tname == "Torso",
+            Self::LeftArm => tid == 29 || tname == "LeftArm" || tname == "Left Arm",
+            Self::RightArm => tid == 28 || tname == "RightArm" || tname == "Right Arm",
+            Self::LeftLeg => tid == 30 || tname == "LeftLeg" || tname == "Left Leg",
+            Self::RightLeg => tid == 31 || tname == "RightLeg" || tname == "Right Leg",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutfitFilter {
+    All,
+    Saved,
+    Characters,
+}
+
+impl OutfitFilter {
+    pub const ALL: [Self; 3] = [Self::All, Self::Saved, Self::Characters];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Saved => "Saved",
+            Self::Characters => "Characters",
         }
     }
 }
@@ -446,6 +529,8 @@ pub enum Action {
     ToggleWearAsset(AvatarAsset),
     UnequipAccessories,
     WearOutfit(OutfitItem),
+    SaveOutfit(String),
+    DeleteOutfit(OutfitItem),
     SetAvatarType(String),
     SetBodyColorId(u64),
     ApplyAvatarScales,
@@ -482,6 +567,7 @@ pub enum Msg {
     AvatarLoaded(Result<(AvatarState, Vec<PaletteColor>), String>),
     AvatarInventory(AvatarTab, bool, Result<(Vec<AvatarAsset>, Option<String>), String>),
     AvatarOutfits(u32, Result<(Vec<OutfitItem>, bool), String>),
+    OutfitActionDone(Result<String, String>),
     AvatarApplied(u64, Result<(AvatarState, String, String, String), String>),
     Avatar3DLoaded(u64, Result<(avatar_3d::Avatar3DModel, Vec<(String, Vec<u8>)>), String>),
     AuthSession(Result<(Profile, Vec<User>), String>),
@@ -502,4 +588,44 @@ pub enum Msg {
     VideoPreviewLoaded(u64, Result<Arc<video_preview::DecodedPreviewVideo>, String>),
     WallpaperPicked(Option<String>),
     WallpaperLoaded(String, Result<egui::ColorImage, String>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk_asset(id: u64, type_id: u64, type_name: &str) -> AvatarAsset {
+        AvatarAsset {
+            id,
+            name: type_name.to_string(),
+            asset_type_id: type_id,
+            asset_type_name: type_name.to_string(),
+            thumb: String::new(),
+            meta: None,
+            creator_name: String::new(),
+            creator_verified: false,
+            price: None,
+        }
+    }
+
+    #[test]
+    fn body_parts_tab_and_filters_match_expected_slots() {
+        let q = AvatarTab::BodyParts.inventory_query().unwrap();
+        for token in ["Head", "Torso", "LeftArm", "RightArm", "LeftLeg", "RightLeg"] {
+            assert!(q.contains(token), "missing {token} in query {q}");
+        }
+
+        let head = mk_asset(1, 17, "Head");
+        let torso = mk_asset(2, 27, "Torso");
+        let r_arm = mk_asset(3, 28, "Right Arm");
+        let l_leg = mk_asset(4, 30, "LeftLeg");
+
+        assert!(BodyPartFilter::All.matches(&torso));
+        assert!(BodyPartFilter::Head.matches(&head));
+        assert!(!BodyPartFilter::Head.matches(&torso));
+        assert!(BodyPartFilter::Torso.matches(&torso));
+        assert!(BodyPartFilter::RightArm.matches(&r_arm));
+        assert!(BodyPartFilter::LeftLeg.matches(&l_leg));
+        assert!(!BodyPartFilter::LeftArm.matches(&r_arm));
+    }
 }

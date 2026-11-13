@@ -1,7 +1,7 @@
-﻿use eframe::egui::{self, Color32, CornerRadius, RichText, Sense};
+use eframe::egui::{self, Color32, CornerRadius, RichText, Sense};
 use crate::api::format_commas;
 use crate::app::RustBlox;
-use crate::theme::{compact, pal, GREEN, RED};
+use crate::theme::{accent_color, compact, is_dark_color, pal, GREEN, ORANGE, RED};
 use crate::types::{Action, Game, GameTab, ServerItem, ServerSort};
 use crate::ui::widgets::*;
 
@@ -588,20 +588,28 @@ impl RustBlox {
                 });
             }
             GameTab::Servers => {
+                let accent = accent_color(ui);
+                let accent_fg = if is_dark_color([accent.r(), accent.g(), accent.b()]) {
+                    Color32::WHITE
+                } else {
+                    Color32::from_rgb(16, 19, 26)
+                };
+
                 avatar_glass_frame(ui, 18).show(ui, |ui| {
                     ui.set_width((ui.available_width() - 4.0).max(260.0));
 
-                    let (total_count, visible_servers) = if let Some(ex) = ex {
+                    let (total_count, open_count, visible_servers) = if let Some(ex) = ex {
                         let total = ex.servers.len();
+                        let open = ex
+                            .servers
+                            .iter()
+                            .filter(|s| s.playing < s.max_players)
+                            .count();
                         let mut list: Vec<(usize, &ServerItem)> = ex.servers
                             .iter()
                             .enumerate()
                             .filter(|(_, s)| {
-                                if self.server_exclude_full {
-                                    s.playing < s.max_players
-                                } else {
-                                    true
-                                }
+                                !self.server_exclude_full || s.playing < s.max_players
                             })
                             .collect();
 
@@ -609,217 +617,268 @@ impl RustBlox {
                             ServerSort::Default => {}
                             ServerSort::LowestPing => {
                                 list.sort_by(|(_, a), (_, b)| {
-                                    let pa = a.ping.unwrap_or(u64::MAX);
-                                    let pb = b.ping.unwrap_or(u64::MAX);
-                                    pa.cmp(&pb)
+                                    a.ping
+                                        .unwrap_or(u64::MAX)
+                                        .cmp(&b.ping.unwrap_or(u64::MAX))
                                 });
                             }
                             ServerSort::FewestPlayers => {
-                                list.sort_by(|(_, a), (_, b)| {
-                                    a.playing.cmp(&b.playing)
-                                });
+                                list.sort_by(|(_, a), (_, b)| a.playing.cmp(&b.playing));
                             }
                             ServerSort::MostPlayers => {
-                                list.sort_by(|(_, a), (_, b)| {
-                                    b.playing.cmp(&a.playing)
-                                });
+                                list.sort_by(|(_, a), (_, b)| b.playing.cmp(&a.playing));
                             }
                             ServerSort::HighestFps => {
                                 list.sort_by(|(_, a), (_, b)| {
-                                    let fa = a.fps.unwrap_or(0.0);
-                                    let fb = b.fps.unwrap_or(0.0);
-                                    fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal)
+                                    b.fps
+                                        .unwrap_or(0.0)
+                                        .partial_cmp(&a.fps.unwrap_or(0.0))
+                                        .unwrap_or(std::cmp::Ordering::Equal)
                                 });
                             }
                         }
-                        (total, list)
+                        (total, open, list)
                     } else {
-                        (0, Vec::new())
+                        (0, 0, Vec::new())
                     };
 
-                    let title_text = if total_count > 0 && self.server_exclude_full {
-                        format!("Public Servers ({}/{} open)", visible_servers.len(), total_count)
-                    } else if total_count > 0 {
-                        format!("Public Servers ({total_count})")
-                    } else {
-                        "Public Servers".to_string()
+                    let render_sort_combo =
+                        |ui: &mut egui::Ui, sort: &mut ServerSort, id_salt: &str| {
+                            ui.add(
+                                egui::Image::new(egui::include_image!(
+                                    "../../assets/icon_sort.png"
+                                ))
+                                .fit_to_exact_size(egui::vec2(14.0, 14.0))
+                                .tint(p.muted),
+                            );
+                            egui::ComboBox::from_id_salt(id_salt)
+                                .selected_text(sort.label())
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        sort,
+                                        ServerSort::Default,
+                                        "Default Order",
+                                    );
+                                    ui.selectable_value(
+                                        sort,
+                                        ServerSort::LowestPing,
+                                        "Lowest Ping",
+                                    );
+                                    ui.selectable_value(
+                                        sort,
+                                        ServerSort::FewestPlayers,
+                                        "Fewest Players",
+                                    );
+                                    ui.selectable_value(
+                                        sort,
+                                        ServerSort::MostPlayers,
+                                        "Most Players",
+                                    );
+                                    ui.selectable_value(
+                                        sort,
+                                        ServerSort::HighestFps,
+                                        "Best FPS",
+                                    );
+                                });
+                        };
+
+                    let render_open_toggle = |ui: &mut egui::Ui, exclude_full: &mut bool| {
+                        let pill_bg = if *exclude_full {
+                            Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 36)
+                        } else {
+                            p.surface_bg
+                        };
+                        let pill_stroke = egui::Stroke::new(
+                            1.0,
+                            if *exclude_full { accent } else { p.border },
+                        );
+                        let pill_color = if *exclude_full { p.text } else { p.muted };
+                        let label_txt = if *exclude_full {
+                            "Open Only"
+                        } else {
+                            "Exclude Full"
+                        };
+                        let pill_btn = egui::Button::new(
+                            RichText::new(label_txt).size(12.0).strong().color(pill_color),
+                        )
+                        .fill(pill_bg)
+                        .stroke(pill_stroke)
+                        .corner_radius(8)
+                        .min_size(egui::vec2(0.0, 28.0));
+                        if ui
+                            .add(pill_btn)
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text("Hide full servers to show only joinable instances")
+                            .clicked()
+                        {
+                            *exclude_full = !*exclude_full;
+                        }
+                    };
+
+                    let render_refresh_btn = |ui: &mut egui::Ui| -> bool {
+                        let btn = egui::Button::new(
+                            RichText::new("Refresh").size(12.0).strong().color(p.text),
+                        )
+                        .fill(p.surface_bg)
+                        .stroke(egui::Stroke::new(1.0, p.border))
+                        .corner_radius(8)
+                        .min_size(egui::vec2(68.0, 28.0));
+                        ui.add(btn)
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
                     };
 
                     let avail_w = ui.available_width();
-                    let is_wide = avail_w >= 560.0;
+                    let is_wide = avail_w >= 580.0;
+                    let exclude_full_snap = self.server_exclude_full;
+                    let visible_len = visible_servers.len();
+
+                    let render_title_badge = |ui: &mut egui::Ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            ui.label(
+                                RichText::new("Public Servers")
+                                    .size(17.5)
+                                    .strong()
+                                    .color(p.text),
+                            );
+                            if total_count > 0 {
+                                let badge_txt = if exclude_full_snap {
+                                    format!("{visible_len}/{total_count} open")
+                                } else {
+                                    format!("{open_count} open \u{00B7} {total_count} total")
+                                };
+                                egui::Frame::new()
+                                    .fill(p.surface_bg)
+                                    .stroke(egui::Stroke::new(1.0, p.border))
+                                    .corner_radius(10)
+                                    .inner_margin(egui::Margin::symmetric(8, 3))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new(badge_txt)
+                                                .size(11.5)
+                                                .color(p.muted),
+                                        );
+                                    });
+                            }
+                        });
+                    };
 
                     if is_wide {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(&title_text).size(17.0).strong());
+                            render_title_badge(ui);
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("â†» Refresh").clicked() {
+                                ui.spacing_mut().item_spacing.x = 8.0;
+                                if render_refresh_btn(ui) {
                                     acts.push(Action::RefreshServers(g.universe_id, g.place_id));
                                 }
-
-                                ui.add_space(6.0);
-
-                                let exclude_full = self.server_exclude_full;
-                                let pill_txt = if exclude_full { "âœ“ Open Slots Only" } else { "Exclude Full" };
-                                let pill_bg = if exclude_full {
-                                    if ui.visuals().dark_mode {
-                                        Color32::from_rgba_unmultiplied(34, 197, 94, 38)
-                                    } else {
-                                        Color32::from_rgba_unmultiplied(34, 197, 94, 28)
-                                    }
-                                } else {
-                                    p.card_bg
-                                };
-                                let pill_stroke = if exclude_full {
-                                    egui::Stroke::new(1.0, GREEN)
-                                } else {
-                                    egui::Stroke::new(1.0, p.border)
-                                };
-                                let pill_color = if exclude_full {
-                                    if ui.visuals().dark_mode { Color32::from_rgb(134, 239, 172) } else { GREEN }
-                                } else {
-                                    p.muted
-                                };
-
-                                let pill_btn = egui::Button::new(
-                                    RichText::new(pill_txt).size(12.0).strong().color(pill_color),
-                                )
-                                .fill(pill_bg)
-                                .stroke(pill_stroke)
-                                .corner_radius(6);
-                                if ui
-                                    .add(pill_btn)
-                                    .on_hover_text("Hide full servers (12/12) to show only joinable games")
-                                    .clicked()
-                                {
-                                    self.server_exclude_full = !self.server_exclude_full;
-                                }
-
-                                ui.add_space(6.0);
-
-                                egui::ComboBox::from_id_salt("servers_sort_combo")
-                                    .selected_text(self.server_sort.label())
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut self.server_sort, ServerSort::Default, "Default Order");
-                                        ui.selectable_value(&mut self.server_sort, ServerSort::LowestPing, "âš¡ Lowest Ping");
-                                        ui.selectable_value(&mut self.server_sort, ServerSort::FewestPlayers, "ðŸ‘¤ Fewest Players (Small)");
-                                        ui.selectable_value(&mut self.server_sort, ServerSort::MostPlayers, "ðŸ‘¥ Most Players (Full)");
-                                        ui.selectable_value(&mut self.server_sort, ServerSort::HighestFps, "ðŸŽ¯ Best FPS");
-                                    });
-
-                                ui.add_space(4.0);
-
-                                let sort_icon = egui::Image::new(egui::include_image!("../../assets/icon_sort.png"))
-                                    .fit_to_exact_size(egui::vec2(14.0, 14.0))
-                                    .tint(p.muted);
-                                ui.add(sort_icon);
+                                render_open_toggle(ui, &mut self.server_exclude_full);
+                                render_sort_combo(
+                                    ui,
+                                    &mut self.server_sort,
+                                    "servers_sort_combo",
+                                );
                             });
                         });
                     } else {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(&title_text).size(17.0).strong());
+                            render_title_badge(ui);
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("â†» Refresh").clicked() {
+                                if render_refresh_btn(ui) {
                                     acts.push(Action::RefreshServers(g.universe_id, g.place_id));
                                 }
                             });
                         });
-                        ui.add_space(6.0);
+                        ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            let sort_icon = egui::Image::new(egui::include_image!("../../assets/icon_sort.png"))
-                                .fit_to_exact_size(egui::vec2(14.0, 14.0))
-                                .tint(p.muted);
-                            ui.add(sort_icon);
-
-                            egui::ComboBox::from_id_salt("servers_sort_combo_narrow")
-                                .selected_text(self.server_sort.label())
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut self.server_sort, ServerSort::Default, "Default Order");
-                                    ui.selectable_value(&mut self.server_sort, ServerSort::LowestPing, "âš¡ Lowest Ping");
-                                    ui.selectable_value(&mut self.server_sort, ServerSort::FewestPlayers, "ðŸ‘¤ Fewest Players (Small)");
-                                    ui.selectable_value(&mut self.server_sort, ServerSort::MostPlayers, "ðŸ‘¥ Most Players (Full)");
-                                    ui.selectable_value(&mut self.server_sort, ServerSort::HighestFps, "ðŸŽ¯ Best FPS");
-                                });
-
-                            ui.add_space(6.0);
-
-                            let exclude_full = self.server_exclude_full;
-                            let pill_txt = if exclude_full { "âœ“ Open Slots Only" } else { "Exclude Full" };
-                            let pill_bg = if exclude_full {
-                                if ui.visuals().dark_mode {
-                                    Color32::from_rgba_unmultiplied(34, 197, 94, 38)
-                                } else {
-                                    Color32::from_rgba_unmultiplied(34, 197, 94, 28)
-                                }
-                            } else {
-                                p.card_bg
-                            };
-                            let pill_stroke = if exclude_full {
-                                egui::Stroke::new(1.0, GREEN)
-                            } else {
-                                egui::Stroke::new(1.0, p.border)
-                            };
-                            let pill_color = if exclude_full {
-                                if ui.visuals().dark_mode { Color32::from_rgb(134, 239, 172) } else { GREEN }
-                            } else {
-                                p.muted
-                            };
-
-                            let pill_btn = egui::Button::new(
-                                RichText::new(pill_txt).size(12.0).strong().color(pill_color),
-                            )
-                            .fill(pill_bg)
-                            .stroke(pill_stroke)
-                            .corner_radius(6);
-                            if ui
-                                .add(pill_btn)
-                                .on_hover_text("Hide full servers (12/12) to show only joinable games")
-                                .clicked()
-                            {
-                                self.server_exclude_full = !self.server_exclude_full;
-                            }
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            render_sort_combo(
+                                ui,
+                                &mut self.server_sort,
+                                "servers_sort_combo_narrow",
+                            );
+                            render_open_toggle(ui, &mut self.server_exclude_full);
                         });
                     }
                     ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(12.0);
 
                     if let Some(err) = &self.game_servers_err {
                         ui.colored_label(RED, format!("Could not load servers: {err}"));
                     } else if let Some(ex) = ex {
                         if total_count == 0 && !self.game_servers_loading {
-                            ui.label(
-                                RichText::new("No active public servers found right now.")
-                                    .color(p.muted),
-                            );
+                            egui::Frame::new()
+                                .fill(p.surface_bg)
+                                .stroke(egui::Stroke::new(1.0, p.border))
+                                .corner_radius(12)
+                                .inner_margin(18)
+                                .show(ui, |ui| {
+                                    ui.set_width((ui.available_width() - 4.0).max(200.0));
+                                    ui.vertical_centered(|ui| {
+                                        ui.label(
+                                            RichText::new("No active public servers right now.")
+                                                .size(13.5)
+                                                .color(p.muted),
+                                        );
+                                    });
+                                });
                         } else if visible_servers.is_empty() && !self.game_servers_loading {
                             egui::Frame::new()
                                 .fill(p.surface_bg)
                                 .stroke(egui::Stroke::new(1.0, p.border))
-                                .corner_radius(10)
-                                .inner_margin(16)
+                                .corner_radius(12)
+                                .inner_margin(18)
                                 .show(ui, |ui| {
-                                    ui.set_width((ui.available_width() - 8.0).max(200.0));
+                                    ui.set_width((ui.available_width() - 4.0).max(200.0));
                                     ui.vertical_centered(|ui| {
                                         ui.add_space(4.0);
                                         ui.label(
                                             RichText::new(format!(
-                                                "All {total_count} loaded servers are currently full."
+                                                "All {total_count} loaded servers are full."
                                             ))
-                                            .size(14.0)
-                                            .strong(),
+                                            .size(14.5)
+                                            .strong()
+                                            .color(p.text),
                                         );
                                         ui.add_space(4.0);
                                         ui.label(
-                                            RichText::new("Turn off 'Exclude Full' or load more servers to find an open slot.")
-                                                .size(12.5)
-                                                .color(p.muted),
+                                            RichText::new(
+                                                "Disable \"Exclude Full\" or load more servers to find an open spot.",
+                                            )
+                                            .size(12.5)
+                                            .color(p.muted),
                                         );
                                         ui.add_space(10.0);
                                         ui.horizontal(|ui| {
-                                            if ui.button("Show Full Servers").clicked() {
+                                            let show_btn = egui::Button::new(
+                                                RichText::new("Show Full Servers")
+                                                    .size(12.5)
+                                                    .strong()
+                                                    .color(p.text),
+                                            )
+                                            .fill(p.card_bg)
+                                            .stroke(egui::Stroke::new(1.0, p.border))
+                                            .corner_radius(8);
+                                            if ui.add(show_btn).clicked() {
                                                 self.server_exclude_full = false;
                                             }
-                                            if ex.servers_cursor.is_some() && !self.game_servers_loading {
-                                                if ui.button("Load More Servers").clicked() {
-                                                    acts.push(Action::LoadMoreServers(g.universe_id, g.place_id));
+                                            if ex.servers_cursor.is_some()
+                                                && !self.game_servers_loading
+                                            {
+                                                let more_btn = egui::Button::new(
+                                                    RichText::new("Load More Servers")
+                                                        .size(12.5)
+                                                        .strong()
+                                                        .color(accent_fg),
+                                                )
+                                                .fill(accent)
+                                                .corner_radius(8);
+                                                if ui.add(more_btn).clicked() {
+                                                    acts.push(Action::LoadMoreServers(
+                                                        g.universe_id,
+                                                        g.place_id,
+                                                    ));
                                                 }
                                             }
                                         });
@@ -827,13 +886,13 @@ impl RustBlox {
                                     });
                                 });
                         } else {
-                            let avail = (ui.available_width() - 10.0).max(240.0);
-                            let gap = 10.0;
-                            let cols = ((avail / 250.0).floor() as usize).clamp(1, 4);
+                            let avail = (ui.available_width() - 4.0).max(240.0);
+                            let gap = 12.0;
+                            let cols = ((avail / 252.0).floor() as usize).clamp(1, 4);
                             let card_w = ((avail - gap * (cols as f32 - 1.0)) / cols as f32)
                                 .floor()
                                 .max(200.0);
-                            let inner_w = card_w - 24.0;
+                            let inner_w = (card_w - 24.0).max(160.0);
                             for row in visible_servers.chunks(cols) {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = gap;
@@ -845,77 +904,111 @@ impl RustBlox {
                                         egui::Frame::new()
                                             .fill(p.surface_bg)
                                             .stroke(egui::Stroke::new(1.0, p.border))
-                                            .corner_radius(10)
-                                            .inner_margin(10)
+                                            .corner_radius(12)
+                                            .inner_margin(12)
                                             .show(ui, |ui| {
                                                 ui.set_width(inner_w);
                                                 ui.vertical(|ui| {
+                                                    // Header: Server # + clean player capacity badge
                                                     ui.horizontal(|ui| {
-                                                        let title_resp = ui.label(
-                                                            RichText::new(format!(
-                                                                "Server #{num}"
-                                                            ))
-                                                            .size(14.0)
-                                                            .strong(),
-                                                        );
-                                                        title_resp.on_hover_text(format!("Instance #{num}\nServer ID: {}", srv.id));
+                                                        ui.label(
+                                                            RichText::new(format!("Server #{num}"))
+                                                                .size(14.0)
+                                                                .strong()
+                                                                .color(p.text),
+                                                        )
+                                                        .on_hover_text(format!(
+                                                            "Server ID: {}",
+                                                            srv.id
+                                                        ));
+
                                                         ui.with_layout(
                                                             egui::Layout::right_to_left(
                                                                 egui::Align::Center,
                                                             ),
                                                             |ui| {
-                                                                if is_full {
-                                                                    ui.label(
-                                                                        RichText::new(format!(
-                                                                            "{} / {}",
-                                                                            srv.playing, srv.max_players
-                                                                        ))
-                                                                        .size(12.5)
-                                                                        .color(p.muted)
-                                                                        .strong(),
-                                                                    );
+                                                                let cap_col = if is_full {
+                                                                    p.muted
+                                                                } else if open_slots <= 2 {
+                                                                    ORANGE
                                                                 } else {
-                                                                    let count_color = if open_slots <= 2 {
-                                                                        Color32::from_rgb(234, 179, 8)
-                                                                    } else {
-                                                                        GREEN
-                                                                    };
-                                                                    ui.label(
-                                                                        RichText::new(format!(
-                                                                            "{} / {}",
-                                                                            srv.playing, srv.max_players
-                                                                        ))
-                                                                        .size(12.5)
-                                                                        .color(count_color)
-                                                                        .strong(),
-                                                                    );
-                                                                }
+                                                                    GREEN
+                                                                };
+                                                                let badge_bg = Color32::from_rgba_unmultiplied(
+                                                                    cap_col.r(),
+                                                                    cap_col.g(),
+                                                                    cap_col.b(),
+                                                                    if is_full { 22 } else { 32 },
+                                                                );
+                                                                egui::Frame::new()
+                                                                    .fill(badge_bg)
+                                                                    .corner_radius(8)
+                                                                    .inner_margin(egui::Margin::symmetric(7, 2))
+                                                                    .show(ui, |ui| {
+                                                                        ui.label(
+                                                                            RichText::new(format!(
+                                                                                "{}/{}",
+                                                                                srv.playing,
+                                                                                srv.max_players
+                                                                            ))
+                                                                            .size(11.5)
+                                                                            .strong()
+                                                                            .color(cap_col),
+                                                                        );
+                                                                    });
                                                             },
                                                         );
                                                     });
-                                                    ui.add_space(4.0);
+
+                                                    ui.add_space(8.0);
+
+                                                    // Telemetry row: crisp drawn ping dot + ping ms on left, FPS on right
                                                     let (dot_color, ping_txt) = match srv.ping {
-                                                        Some(ms) if ms < 60 => (GREEN, format!("{ms} ms")),
-                                                        Some(ms) if ms < 120 => (Color32::from_rgb(234, 179, 8), format!("{ms} ms")),
-                                                        Some(ms) => (Color32::from_rgb(239, 68, 68), format!("{ms} ms")),
-                                                        None => (p.muted, "--".to_string()),
+                                                        Some(ms) if ms < 60 => {
+                                                            (GREEN, format!("{ms} ms"))
+                                                        }
+                                                        Some(ms) if ms < 130 => {
+                                                            (ORANGE, format!("{ms} ms"))
+                                                        }
+                                                        Some(ms) => (RED, format!("{ms} ms")),
+                                                        None => (p.muted, "-- ms".to_string()),
                                                     };
                                                     let fps_txt = srv
                                                         .fps
                                                         .map(|f| format!("{f:.0} FPS"))
-                                                        .unwrap_or_else(|| "--".to_string());
+                                                        .unwrap_or_else(|| "-- FPS".to_string());
                                                     ui.horizontal(|ui| {
-                                                        ui.spacing_mut().item_spacing.x = 4.0;
-                                                        ui.label(RichText::new("â—").size(8.0).color(dot_color));
+                                                        let (dot_r, _) = ui.allocate_exact_size(
+                                                            egui::vec2(8.0, 14.0),
+                                                            Sense::hover(),
+                                                        );
+                                                        ui.painter().circle_filled(
+                                                            dot_r.center(),
+                                                            3.5,
+                                                            dot_color,
+                                                        );
                                                         ui.label(
-                                                            RichText::new(format!(
-                                                                "Ping: {ping_txt}  â€¢  {fps_txt}"
-                                                            ))
-                                                            .size(12.0)
-                                                            .color(p.muted),
+                                                            RichText::new(ping_txt)
+                                                                .size(12.0)
+                                                                .color(p.muted),
+                                                        );
+                                                        ui.with_layout(
+                                                            egui::Layout::right_to_left(
+                                                                egui::Align::Center,
+                                                            ),
+                                                            |ui| {
+                                                                ui.label(
+                                                                    RichText::new(fps_txt)
+                                                                        .size(12.0)
+                                                                        .color(p.muted),
+                                                                );
+                                                            },
                                                         );
                                                     });
-                                                    ui.add_space(6.0);
+
+                                                    ui.add_space(7.0);
+
+                                                    // Occupancy progress bar
                                                     let fill_ratio = if srv.max_players > 0 {
                                                         (srv.playing as f32
                                                             / srv.max_players as f32)
@@ -929,33 +1022,52 @@ impl RustBlox {
                                                     );
                                                     ui.painter().rect_filled(
                                                         bar_r,
-                                                        CornerRadius::same(2),
-                                                        p.border,
+                                                        CornerRadius::same(3),
+                                                        p.card_bg,
                                                     );
-                                                    let fill_r = egui::Rect::from_min_max(
-                                                        bar_r.min,
-                                                        egui::pos2(
-                                                            bar_r.left()
-                                                                + bar_r.width() * fill_ratio,
-                                                            bar_r.max.y,
-                                                        ),
-                                                    );
-                                                    let bar_color = if is_full {
-                                                        Color32::from_rgb(156, 163, 175)
-                                                    } else {
-                                                        GREEN
-                                                    };
-                                                    ui.painter().rect_filled(
-                                                        fill_r,
-                                                        CornerRadius::same(2),
-                                                        bar_color,
-                                                    );
-                                                    ui.add_space(8.0);
-                                                    let (btn_txt, btn_fill, btn_color) = if is_full {
-                                                        ("Join (Full)", p.card_bg, p.muted)
-                                                    } else {
-                                                        ("Join Server", GREEN, Color32::WHITE)
-                                                    };
+                                                    if fill_ratio > 0.0 {
+                                                        let fill_r = egui::Rect::from_min_max(
+                                                            bar_r.min,
+                                                            egui::pos2(
+                                                                bar_r.left()
+                                                                    + (bar_r.width() * fill_ratio)
+                                                                        .max(4.0),
+                                                                bar_r.max.y,
+                                                            ),
+                                                        );
+                                                        let bar_color = if is_full {
+                                                            p.muted
+                                                        } else if open_slots <= 2 {
+                                                            ORANGE
+                                                        } else {
+                                                            accent
+                                                        };
+                                                        ui.painter().rect_filled(
+                                                            fill_r,
+                                                            CornerRadius::same(3),
+                                                            bar_color,
+                                                        );
+                                                    }
+
+                                                    ui.add_space(10.0);
+
+                                                    // Join CTA button
+                                                    let (btn_txt, btn_fill, btn_color, btn_stroke) =
+                                                        if is_full {
+                                                            (
+                                                                "Join (Full)",
+                                                                p.card_bg,
+                                                                p.muted,
+                                                                egui::Stroke::new(1.0, p.border),
+                                                            )
+                                                        } else {
+                                                            (
+                                                                "Join Server",
+                                                                accent,
+                                                                accent_fg,
+                                                                egui::Stroke::NONE,
+                                                            )
+                                                        };
                                                     let join_btn = egui::Button::new(
                                                         RichText::new(btn_txt)
                                                             .size(12.5)
@@ -963,10 +1075,16 @@ impl RustBlox {
                                                             .color(btn_color),
                                                     )
                                                     .fill(btn_fill)
-                                                    .stroke(if is_full { egui::Stroke::new(1.0, p.border) } else { egui::Stroke::NONE })
-                                                    .corner_radius(7)
-                                                    .min_size(egui::vec2(inner_w, 28.0));
-                                                    if ui.add(join_btn).clicked() {
+                                                    .stroke(btn_stroke)
+                                                    .corner_radius(8)
+                                                    .min_size(egui::vec2(inner_w, 30.0));
+                                                    if ui
+                                                        .add(join_btn)
+                                                        .on_hover_cursor(
+                                                            egui::CursorIcon::PointingHand,
+                                                        )
+                                                        .clicked()
+                                                    {
                                                         acts.push(Action::JoinServer(
                                                             g.place_id,
                                                             srv.id.clone(),
@@ -979,10 +1097,29 @@ impl RustBlox {
                                 ui.add_space(gap);
                             }
                             if ex.servers_cursor.is_some() && !self.game_servers_loading {
-                                ui.add_space(8.0);
-                                if ui.button("Load more servers").clicked() {
-                                    acts.push(Action::LoadMoreServers(g.universe_id, g.place_id));
-                                }
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    let more_btn = egui::Button::new(
+                                        RichText::new("Load More Servers")
+                                            .size(12.5)
+                                            .strong()
+                                            .color(p.text),
+                                    )
+                                    .fill(p.surface_bg)
+                                    .stroke(egui::Stroke::new(1.0, p.border))
+                                    .corner_radius(8)
+                                    .min_size(egui::vec2(140.0, 30.0));
+                                    if ui
+                                        .add(more_btn)
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .clicked()
+                                    {
+                                        acts.push(Action::LoadMoreServers(
+                                            g.universe_id,
+                                            g.place_id,
+                                        ));
+                                    }
+                                });
                             }
                         }
                     }
@@ -990,7 +1127,11 @@ impl RustBlox {
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label("Loading live servers from Roblox...");
+                            ui.label(
+                                RichText::new("Loading live servers from Roblox...")
+                                    .size(12.5)
+                                    .color(p.muted),
+                            );
                         });
                     }
                 });

@@ -32,7 +32,7 @@ impl RustBlox {
                     brand_title(ui, 26.0, false);
                     ui.add_space(6.0);
                     ui.label(
-                        RichText::new("Connect your Roblox account with Quick Login â€” no password needed, encrypted locally with Windows DPAPI.")
+                        RichText::new("Connect your Roblox account with Quick Login \u{2014} no password needed, encrypted locally with Windows DPAPI.")
                             .color(p.muted)
                             .size(13.0),
                     );
@@ -48,7 +48,7 @@ impl RustBlox {
                                 ui.label(&ql.status_text);
                             });
                         } else {
-                            ui.label("1. Open the Roblox app or roblox.com â†’ Settings â†’ Quick Login");
+                            ui.label("1. Open the Roblox app or roblox.com \u{2192} Settings \u{2192} Quick Login");
                             ui.label("2. Enter this 6-character code (or scan the QR code):");
                             ui.add_space(12.0);
 

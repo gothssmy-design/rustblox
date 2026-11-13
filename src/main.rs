@@ -5,6 +5,7 @@ mod app;
 mod auth;
 mod avatar_3d;
 mod roblox_process;
+mod telemetry;
 mod theme;
 mod types;
 mod ui;

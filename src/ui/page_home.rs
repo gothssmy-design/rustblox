@@ -13,25 +13,7 @@ impl RustBlox {
             .map(|p| p.friends)
             .unwrap_or(self.friends.len() as u64);
         ui.add_space(16.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("Friends ({count})")).size(19.0).strong());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let find_btn = ui.add(
-                    egui::Label::new(
-                        RichText::new("Find Friends  â€º")
-                            .size(13.0)
-                            .color(pal(ui).muted),
-                    )
-                    .sense(Sense::click()),
-                );
-                if find_btn.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
-                if find_btn.clicked() {
-                    acts.push(Action::OpenAddFriend);
-                }
-            });
-        });
+        ui.label(RichText::new(format!("Friends ({count})")).size(19.0).strong());
         ui.add_space(10.0);
 
         egui::ScrollArea::horizontal()
@@ -65,7 +47,7 @@ impl RustBlox {
                         let tip = if f.name.is_empty() {
                             format!("User #{}", f.id)
                         } else if f.place_id.is_some() {
-                            format!("@{} â€” Playing {}", f.name, f.location)
+                            format!("@{} \u{2014} Playing {}", f.name, f.location)
                         } else {
                             format!("@{}", f.name)
                         };
@@ -80,7 +62,7 @@ impl RustBlox {
                                 ui.close();
                             }
                             if let Some(pid) = f.place_id {
-                                if ui.button("â–¶ Join game").clicked() {
+                                if ui.button("Join game").clicked() {
                                     acts.push(Action::JoinPlace(pid));
                                     ui.close();
                                 }
@@ -120,7 +102,7 @@ impl RustBlox {
                         let link = ui
                             .add(
                                 egui::Label::new(
-                                    RichText::new(format!("{}  â€º", first.title))
+                                    RichText::new(format!("{}  \u{203A}", first.title))
                                         .size(19.0)
                                         .strong(),
                                 )

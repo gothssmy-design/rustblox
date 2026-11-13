@@ -5,17 +5,9 @@ use crate::types::{Action, CardPreview, Game};
 
 pub fn avatar_glass_frame(ui: &egui::Ui, pad: i8) -> egui::Frame {
     let p = pal(ui);
-    let (fill, stroke) = if ui.visuals().dark_mode {
-        (
-            Color32::from_rgba_unmultiplied(23, 27, 35, 232),
-            egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 24)),
-        )
-    } else {
-        (ui.visuals().faint_bg_color, egui::Stroke::new(1.0, p.border))
-    };
     egui::Frame::new()
-        .fill(fill)
-        .stroke(stroke)
+        .fill(p.card_bg)
+        .stroke(egui::Stroke::new(1.0, p.border))
         .corner_radius(14)
         .inner_margin(pad)
 }
@@ -299,6 +291,13 @@ pub fn game_card(
             };
 
             let a = thumb_styled_with_video(ui, thumb_url, video_tex, is_loading, thumb_size, 8, false);
+            let gp = pal(ui);
+            ui.painter().rect_stroke(
+                a.rect,
+                CornerRadius::same(8),
+                egui::Stroke::new(1.2, gp.games_border),
+                egui::StrokeKind::Inside,
+            );
             ui.add_space(3.0);
 
             let max_title_w = if g.creator_verified {
@@ -490,7 +489,17 @@ pub fn bubble(
         |ui| {
             ui.set_width(108.0);
             ui.spacing_mut().item_spacing.y = 3.0;
-            let r = thumb_styled(ui, url, egui::vec2(96.0, 96.0), 48, true);
+            let r = thumb_styled(ui, url, egui::vec2(96.0, 96.0), 48, false);
+            if plus {
+                ui.painter()
+                    .circle_filled(r.rect.center(), 46.5, p.friends_card_bg);
+            }
+            ui.painter().rect_stroke(
+                r.rect,
+                CornerRadius::same(48),
+                egui::Stroke::new(1.5, p.friends_border),
+                egui::StrokeKind::Inside,
+            );
             if plus {
                 let c = r.rect.center();
                 let st = egui::Stroke::new(2.8, GREEN);

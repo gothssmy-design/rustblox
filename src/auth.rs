@@ -50,6 +50,25 @@ pub fn write_ids(file: &str, ids: &[u64]) {
     write_lines(file, &lines);
 }
 
+fn read_opt_rgb(v: &Value, key: &str) -> Option<[u8; 3]> {
+    let arr = v[key].as_array()?;
+    if arr.len() != 3 {
+        return None;
+    }
+    Some([
+        arr[0].as_u64()?.min(255) as u8,
+        arr[1].as_u64()?.min(255) as u8,
+        arr[2].as_u64()?.min(255) as u8,
+    ])
+}
+
+fn opt_rgb_json(c: Option<[u8; 3]>) -> Value {
+    match c {
+        Some([r, g, b]) => serde_json::json!([r, g, b]),
+        None => Value::Null,
+    }
+}
+
 pub fn load_settings() -> Settings {
     let Ok(text) = fs::read_to_string(data_dir().join("settings.json")) else {
         return Settings::default();
@@ -63,14 +82,7 @@ pub fn load_settings() -> Settings {
         Some("wallpaper") => BgMode::Wallpaper,
         _ => BgMode::ThemeDefault,
     };
-    let bg_color = match v["bg_color"].as_array() {
-        Some(arr) if arr.len() == 3 => [
-            arr[0].as_u64().unwrap_or(def.bg_color[0] as u64).min(255) as u8,
-            arr[1].as_u64().unwrap_or(def.bg_color[1] as u64).min(255) as u8,
-            arr[2].as_u64().unwrap_or(def.bg_color[2] as u64).min(255) as u8,
-        ],
-        _ => def.bg_color,
-    };
+    let bg_color = read_opt_rgb(&v, "bg_color").unwrap_or(def.bg_color);
     let bg_wallpaper = v["bg_wallpaper"].as_str().unwrap_or("").to_string();
     let bg_overlay = v["bg_overlay"]
         .as_f64()
@@ -89,6 +101,11 @@ pub fn load_settings() -> Settings {
         bg_wallpaper,
         bg_overlay,
         text_mode,
+        borders_color: read_opt_rgb(&v, "borders_color"),
+        profile_color: read_opt_rgb(&v, "profile_color"),
+        friends_color: read_opt_rgb(&v, "friends_color"),
+        games_border_color: read_opt_rgb(&v, "games_border_color"),
+        text_border_color: read_opt_rgb(&v, "text_border_color"),
         target_fps: v["target_fps"].as_u64().and_then(|n| u32::try_from(n).ok()),
         auto_close_roblox: v["auto_close_roblox"].as_bool().unwrap_or(true),
     }
@@ -113,6 +130,11 @@ pub fn save_settings(s: &Settings) {
         "bg_wallpaper": s.bg_wallpaper,
         "bg_overlay": s.bg_overlay,
         "text_mode": text_str,
+        "borders_color": opt_rgb_json(s.borders_color),
+        "profile_color": opt_rgb_json(s.profile_color),
+        "friends_color": opt_rgb_json(s.friends_color),
+        "games_border_color": opt_rgb_json(s.games_border_color),
+        "text_border_color": opt_rgb_json(s.text_border_color),
         "target_fps": s.target_fps,
         "auto_close_roblox": s.auto_close_roblox,
     });

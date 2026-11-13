@@ -1709,18 +1709,8 @@ pub fn fetch_avatar_inventory(
     Ok((items, next_cursor))
 }
 
-pub fn fetch_avatar_outfits(
-    user_id: u64,
-    page: u32,
-    cookie: &str,
-) -> Result<(Vec<OutfitItem>, bool), String> {
-    let v = auth_get_json(
-        &format!(
-            "https://avatar.roblox.com/v1/users/{user_id}/outfits?page={page}&itemsPerPage=50"
-        ),
-        Some(cookie),
-    )?;
-    let mut outfits: Vec<OutfitItem> = v["data"]
+fn parse_outfit_list(v: &Value) -> Vec<OutfitItem> {
+    v["data"]
         .as_array()
         .into_iter()
         .flatten()
@@ -1729,10 +1719,62 @@ pub fn fetch_avatar_outfits(
                 id: o["id"].as_u64()?,
                 name: str_of(&o["name"]),
                 thumb: String::new(),
+                is_editable: o["isEditable"].as_bool().unwrap_or(false),
             })
         })
-        .collect();
-    let has_more = outfits.len() >= 50;
+        .collect()
+}
+
+pub fn fetch_avatar_outfits(
+    user_id: u64,
+    page: u32,
+    cookie: &str,
+) -> Result<(Vec<OutfitItem>, bool), String> {
+    let mut outfits: Vec<OutfitItem> = Vec::new();
+    let has_more;
+    if page == 1 {
+        let mut seen = HashSet::new();
+        if let Ok(editable_v) = auth_get_json(
+            &format!(
+                "https://avatar.roblox.com/v1/users/{user_id}/outfits?isEditable=true&page=1&itemsPerPage=50"
+            ),
+            Some(cookie),
+        ) {
+            for item in parse_outfit_list(&editable_v) {
+                if seen.insert(item.id) {
+                    outfits.push(item);
+                }
+            }
+        }
+        let all_res = auth_get_json(
+            &format!(
+                "https://avatar.roblox.com/v1/users/{user_id}/outfits?page=1&itemsPerPage=50"
+            ),
+            Some(cookie),
+        );
+        match all_res {
+            Ok(v) => {
+                let all_items = parse_outfit_list(&v);
+                has_more = all_items.len() >= 50;
+                for item in all_items {
+                    if seen.insert(item.id) {
+                        outfits.push(item);
+                    }
+                }
+            }
+            Err(e) if outfits.is_empty() => return Err(e),
+            Err(_) => has_more = false,
+        }
+    } else {
+        let v = auth_get_json(
+            &format!(
+                "https://avatar.roblox.com/v1/users/{user_id}/outfits?page={page}&itemsPerPage=50"
+            ),
+            Some(cookie),
+        )?;
+        outfits = parse_outfit_list(&v);
+        has_more = outfits.len() >= 50;
+    }
     let ids: Vec<u64> = outfits.iter().map(|o| o.id).collect();
     for chunk in ids.chunks(50) {
         if chunk.is_empty() {
@@ -1980,6 +2022,149 @@ pub fn apply_wear_outfit(
     }
     post_wearing_assets(cookie, &parsed.wearing)?;
     finish_avatar_update(user_id, cookie, format!("Equipped outfit \"{}\".", outfit.name))
+}
+
+fn brick_hex_from_palette(id: u64, palette: &[PaletteColor]) -> String {
+    let c = palette
+        .iter()
+        .find(|p| p.id == id)
+        .map(|p| p.color)
+        .unwrap_or(eframe::egui::Color32::from_rgb(163, 162, 165));
+    format!("{:02X}{:02X}{:02X}", c.r(), c.g(), c.b())
+}
+
+pub fn create_avatar_outfit(
+    cookie: &str,
+    name: &str,
+    fallback_state: Option<AvatarState>,
+    palette: &[PaletteColor],
+) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Please enter an outfit name.".to_string());
+    }
+    let state = match fallback_state {
+        Some(s) => s,
+        None => fetch_avatar_state(cookie)?,
+    };
+
+    let v2 = auth_get_json("https://avatar.roblox.com/v2/avatar/avatar", Some(cookie)).ok();
+    let v4_assets = v2
+        .as_ref()
+        .and_then(|v| v["assets"].as_array().cloned())
+        .map(|arr| {
+            arr.into_iter()
+                .filter_map(|a| {
+                    let id = a["id"].as_u64()?;
+                    let mut obj = serde_json::json!({ "id": id });
+                    if let Some(m) = a.get("meta").filter(|m| !m.is_null()) {
+                        obj["meta"] = m.clone();
+                    }
+                    Some(obj)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| {
+            state
+                .wearing
+                .iter()
+                .map(|a| {
+                    let mut obj = serde_json::json!({ "id": a.id });
+                    if let Some(m) = &a.meta {
+                        obj["meta"] = m.clone();
+                    }
+                    obj
+                })
+                .collect()
+        });
+
+    let body_color3s = v2
+        .as_ref()
+        .and_then(|v| v.get("bodyColor3s").filter(|c| c.is_object()).cloned())
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "headColor3": brick_hex_from_palette(state.colors.head, palette),
+                "torsoColor3": brick_hex_from_palette(state.colors.torso, palette),
+                "rightArmColor3": brick_hex_from_palette(state.colors.right_arm, palette),
+                "leftArmColor3": brick_hex_from_palette(state.colors.left_arm, palette),
+                "rightLegColor3": brick_hex_from_palette(state.colors.right_leg, palette),
+                "leftLegColor3": brick_hex_from_palette(state.colors.left_leg, palette),
+            })
+        });
+
+    let scale_json = v2
+        .as_ref()
+        .and_then(|v| v.get("scales").filter(|s| s.is_object()).cloned())
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "height": (state.scales.height * 100.0).round() / 100.0,
+                "width": (state.scales.width * 100.0).round() / 100.0,
+                "head": (state.scales.head * 100.0).round() / 100.0,
+                "depth": (state.scales.depth * 100.0).round() / 100.0,
+                "proportion": (state.scales.proportion * 100.0).round() / 100.0,
+                "bodyType": (state.scales.body_type * 100.0).round() / 100.0,
+            })
+        });
+
+    let rig = v2
+        .as_ref()
+        .and_then(|v| v["playerAvatarType"].as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(state.avatar_type.as_str());
+
+    let v4_body = serde_json::json!({
+        "name": trimmed,
+        "outfitType": "Avatar",
+        "assets": v4_assets,
+        "bodyColor3s": body_color3s,
+        "scale": scale_json,
+        "playerAvatarType": rig,
+    });
+
+    match post_csrf(
+        "https://avatar.roblox.com/v4/outfits/create",
+        v4_body,
+        Some(cookie),
+        Some("https://www.roblox.com/my/avatar"),
+    ) {
+        Ok(_) => Ok(format!("Saved outfit \"{trimmed}\".")),
+        Err(v4_err) => {
+            let asset_ids: Vec<u64> = state.wearing.iter().map(|a| a.id).collect();
+            let v1_body = serde_json::json!({
+                "name": trimmed,
+                "assetIds": asset_ids,
+                "bodyColors": {
+                    "headColorId": state.colors.head,
+                    "torsoColorId": state.colors.torso,
+                    "rightArmColorId": state.colors.right_arm,
+                    "leftArmColorId": state.colors.left_arm,
+                    "rightLegColorId": state.colors.right_leg,
+                    "leftLegColorId": state.colors.left_leg,
+                },
+                "scale": scale_json,
+                "playerAvatarType": state.avatar_type,
+            });
+            match post_csrf(
+                "https://avatar.roblox.com/v1/outfits/create",
+                v1_body,
+                Some(cookie),
+                Some("https://www.roblox.com/my/avatar"),
+            ) {
+                Ok(_) => Ok(format!("Saved outfit \"{trimmed}\".")),
+                Err(_) => Err(v4_err),
+            }
+        }
+    }
+}
+
+pub fn delete_avatar_outfit(cookie: &str, outfit: &OutfitItem) -> Result<String, String> {
+    post_csrf(
+        &format!("https://avatar.roblox.com/v1/outfits/{}/delete", outfit.id),
+        serde_json::json!({}),
+        Some(cookie),
+        Some("https://www.roblox.com/my/avatar"),
+    )?;
+    Ok(format!("Deleted outfit \"{}\".", outfit.name))
 }
 
 pub fn start_quick_login(tx: Sender<Msg>, ctx: egui::Context) -> Arc<AtomicBool> {
