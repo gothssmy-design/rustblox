@@ -16,6 +16,7 @@ use crate::theme::{
 use crate::types::{Action, BgMode, TextColorMode};
 use crate::ui::page_login::draw_login_marquee;
 use crate::ui::widgets::*;
+use crate::updater::{UpdateKind, RUSTBLOX_RELEASES_URL};
 
 #[derive(Clone, Copy)]
 struct ThemePack {
@@ -209,6 +210,11 @@ impl RustBlox {
 
             ui.add_space(12.0);
 
+            // RustBlox Self-Updater card
+            self.settings_updates_card(ui, acts);
+
+            ui.add_space(12.0);
+
             // Theme & Background card
             self.settings_theme_card(ui);
 
@@ -292,6 +298,9 @@ impl RustBlox {
                         if ui.button("Re-scan").clicked() {
                             self.player_path = find_player();
                             self.status = "Checked Roblox installation".to_string();
+                        }
+                        if ui.button("Check Update").clicked() {
+                            self.check_updates(true);
                         }
                     });
                 } else {
@@ -1438,5 +1447,223 @@ impl RustBlox {
             1 => draw_profile(ui, card_w),
             _ => draw_login(ui, card_w),
         }
+    }
+
+    fn settings_updates_card(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Action>) {
+        let p = pal(ui);
+        let accent = accent_color(ui);
+        let accent_fg = if is_dark_color([accent.r(), accent.g(), accent.b()]) {
+            Color32::WHITE
+        } else {
+            Color32::from_rgb(16, 19, 26)
+        };
+
+        card_frame(ui, 18).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("RustBlox Updates").size(17.0).strong());
+                ui.add_space(4.0);
+                egui::Frame::new()
+                    .fill(p.surface_bg)
+                    .stroke(egui::Stroke::new(1.0, p.border))
+                    .corner_radius(6)
+                    .inner_margin(egui::Margin::symmetric(7, 2))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                                .size(11.0)
+                                .strong()
+                                .color(p.muted),
+                        );
+                    });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Releases").clicked() {
+                        acts.push(Action::OpenUrl(RUSTBLOX_RELEASES_URL.to_string()));
+                    }
+                    let check_label = if self.app_update_checking {
+                        "Checking..."
+                    } else {
+                        "Check for Updates"
+                    };
+                    if ui
+                        .add_enabled(
+                            !self.app_update_checking && !self.app_update_downloading,
+                            egui::Button::new(check_label),
+                        )
+                        .clicked()
+                    {
+                        self.check_app_updates(true);
+                    }
+                });
+            });
+
+            ui.add_space(4.0);
+            small_text(
+                ui,
+                "Download new RustBlox versions and UI updates directly inside the app — no uninstall or reinstall needed."
+                    .to_string(),
+            );
+
+            if self.app_update_downloading {
+                ui.add_space(10.0);
+                let (done, total) = self
+                    .app_update_progress
+                    .as_ref()
+                    .map(|(d, t)| (d.load(Ordering::Relaxed), t.load(Ordering::Relaxed)))
+                    .unwrap_or((0, 0));
+                let frac = if total > 0 {
+                    (done as f32 / total as f32).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let bar_text = if total > 0 {
+                    format!(
+                        "{:.1} / {:.1} MB ({:.0}%)",
+                        done as f64 / (1024.0 * 1024.0),
+                        total as f64 / (1024.0 * 1024.0),
+                        frac * 100.0
+                    )
+                } else {
+                    format!("{:.1} MB downloaded...", done as f64 / (1024.0 * 1024.0))
+                };
+                ui.add(
+                    egui::ProgressBar::new(frac)
+                        .text(bar_text)
+                        .animate(true)
+                        .corner_radius(6),
+                );
+            } else if let Some(rel) = self.app_update_available.clone() {
+                ui.add_space(10.0);
+                let is_patch = rel.kind == UpdateKind::Patch;
+                let already_patched =
+                    self.app_patch_applied.as_deref() == Some(rel.version.as_str());
+                egui::Frame::new()
+                    .fill(p.surface_bg)
+                    .stroke(egui::Stroke::new(1.0, GREEN.gamma_multiply(0.55)))
+                    .corner_radius(10)
+                    .inner_margin(egui::Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            let heading = if already_patched {
+                                format!("Patch v{} active (no restart needed)", rel.version)
+                            } else if is_patch {
+                                format!("Small patch ready: v{} (No restart)", rel.version)
+                            } else {
+                                format!("New version ready: v{}", rel.version)
+                            };
+                            ui.label(RichText::new(heading).size(13.5).strong().color(GREEN));
+                            if rel.exe_size > 0 && !already_patched {
+                                let name_prefix = rel
+                                    .exe_name
+                                    .as_deref()
+                                    .map(|n| format!("{n} · "))
+                                    .unwrap_or_default();
+                                ui.label(
+                                    RichText::new(format!(
+                                        "({name_prefix}{:.1} MB)",
+                                        rel.exe_size as f64 / (1024.0 * 1024.0)
+                                    ))
+                                    .size(11.5)
+                                    .color(p.muted),
+                                );
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if already_patched {
+                                        if self.app_staged_patch.is_some()
+                                            && ui.small_button("Restart Now").clicked()
+                                        {
+                                            self.start_app_update_download(true);
+                                        }
+                                    } else if is_patch {
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    RichText::new(format!(
+                                                        "Apply Patch v{}",
+                                                        rel.version
+                                                    ))
+                                                    .size(12.0)
+                                                    .strong()
+                                                    .color(accent_fg),
+                                                )
+                                                .fill(accent)
+                                                .corner_radius(7),
+                                            )
+                                            .on_hover_text(
+                                                "Applies patch in background without closing RustBlox",
+                                            )
+                                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                            .clicked()
+                                        {
+                                            self.start_app_update_download(false);
+                                        }
+                                    } else {
+                                        let btn_txt = if rel.exe_url.is_some() {
+                                            format!("Update v{}", rel.version)
+                                        } else {
+                                            format!("Open Release v{}", rel.version)
+                                        };
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    RichText::new(btn_txt)
+                                                        .size(12.0)
+                                                        .strong()
+                                                        .color(accent_fg),
+                                                )
+                                                .fill(accent)
+                                                .corner_radius(7),
+                                            )
+                                            .on_hover_text(
+                                                "Closes RustBlox, downloads update, and launches automatically",
+                                            )
+                                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                            .clicked()
+                                        {
+                                            self.start_app_update_download(true);
+                                        }
+                                    }
+                                },
+                            );
+                        });
+                        if !rel.title.is_empty() && rel.title != rel.tag_name {
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(&rel.title).size(12.5).strong().color(p.text));
+                        }
+                        if !rel.notes.is_empty() {
+                            ui.add_space(6.0);
+                            egui::ScrollArea::vertical()
+                                .id_salt("rustblox_release_notes")
+                                .max_height(110.0)
+                                .show(ui, |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&rel.notes).size(12.0).color(p.text),
+                                        )
+                                        .wrap(),
+                                    );
+                                });
+                        }
+                    });
+            } else if let Some(status) = &self.app_update_status {
+                ui.add_space(6.0);
+                ui.label(RichText::new(status).size(12.0).color(p.muted));
+            }
+
+            if let Some(err) = &self.app_update_error {
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(err).size(12.0).color(ORANGE));
+                    if let Some(rel) = &self.app_update_available {
+                        if ui.small_button("Download in Browser").clicked() {
+                            acts.push(Action::OpenUrl(rel.html_url.clone()));
+                        }
+                    }
+                });
+            }
+        });
     }
 }

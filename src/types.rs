@@ -38,6 +38,7 @@ pub struct Settings {
     pub text_border_color: Option<[u8; 3]>,
     pub target_fps: Option<u32>,
     pub auto_close_roblox: bool,
+    pub notifications_silent: bool,
 }
 
 impl Default for Settings {
@@ -56,6 +57,7 @@ impl Default for Settings {
             text_border_color: None,
             target_fps: None,
             auto_close_roblox: true,
+            notifications_silent: false,
         }
     }
 }
@@ -486,6 +488,7 @@ pub enum NavIcon {
     Charts,
     Profile,
     Avatar,
+    Notifications,
     Settings,
 }
 
@@ -499,6 +502,7 @@ pub enum Page {
     AddFriend,
     Profile,
     Avatar,
+    Notifications,
     Settings,
     Login,
 }
@@ -512,6 +516,96 @@ pub struct QuickLoginState {
     pub cancel: Arc<AtomicBool>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum SocialTab {
+    #[default]
+    Requests,
+    Friends,
+    Followers,
+    Following,
+}
+
+impl SocialTab {
+    pub const ALL: [SocialTab; 4] = [
+        SocialTab::Requests,
+        SocialTab::Friends,
+        SocialTab::Followers,
+        SocialTab::Following,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SocialTab::Requests => "Requests",
+            SocialTab::Friends => "Friends",
+            SocialTab::Followers => "Followers",
+            SocialTab::Following => "Following",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ToastKind {
+    FriendRequest,
+    UpdateAvailable,
+    Success,
+    Error,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NotificationSource {
+    RobloxApi,
+    RustBlox,
+    Process,
+}
+
+impl NotificationSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            NotificationSource::RobloxApi => "Roblox API",
+            NotificationSource::RustBlox => "RustBlox",
+            NotificationSource::Process => "Process",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ToastAction {
+    AcceptFriendRequest { uid: u64, uname: String },
+    OpenRequests,
+    OpenSettings,
+    OpenUrl(String),
+    KillRoblox,
+}
+
+#[derive(Clone, Debug)]
+pub struct NotificationItem {
+    pub id: u64,
+    pub source: NotificationSource,
+    pub kind: ToastKind,
+    pub title: String,
+    pub body: String,
+    pub avatar: Option<String>,
+    pub primary_action: Option<(String, ToastAction)>,
+    pub secondary_action: Option<(String, ToastAction)>,
+    pub created_secs: f64,
+    pub read: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToastNotification {
+    pub id: u64,
+    pub kind: ToastKind,
+    pub title: String,
+    pub body: String,
+    pub avatar: Option<String>,
+    pub primary_action: Option<(String, ToastAction)>,
+    pub secondary_action: Option<(String, ToastAction)>,
+    pub created_at: f64,
+    pub duration: f64,
+    pub paused_at: Option<f64>,
+    pub dismissed_at: Option<f64>,
+}
+
 pub enum Action {
     Go(Page),
     GoChart(usize),
@@ -523,6 +617,11 @@ pub enum Action {
     SearchUsers(String),
     LoadMoreUsers,
     SendFriendRequest(u64, String),
+    SelectSocialTab(SocialTab),
+    RefreshSocialTab(SocialTab),
+    LoadMoreSocialTab(SocialTab),
+    AcceptFriendRequest(u64, String),
+    DeclineFriendRequest(u64, String),
     Play(Game),
     JoinPlace(u64),
     ToggleFav(Game),
@@ -555,6 +654,7 @@ pub enum Action {
     SwitchAccount(u64),
     RemoveAccount(u64),
     SignOut,
+    KillRobloxProcesses,
 }
 
 pub enum Msg {
@@ -573,6 +673,17 @@ pub enum Msg {
     FriendProfile(u64, Result<FriendProfile, String>),
     FriendSearchResult(bool, Result<UserSearchPage, String>),
     FriendRequestDone(u64, String, Result<(), String>),
+    SocialListLoaded {
+        tab: SocialTab,
+        append: bool,
+        res: Result<(Vec<User>, Option<String>), String>,
+    },
+    FriendRequestResponded {
+        uid: u64,
+        uname: String,
+        accepted: bool,
+        res: Result<(), String>,
+    },
     GameExtraLoaded(Box<GameExtra>),
     GamePassesLoaded(u64, Result<Vec<GamePassItem>, String>),
     GameServersLoaded(u64, bool, Result<(Vec<ServerItem>, Option<String>), String>),
@@ -598,10 +709,18 @@ pub enum Msg {
     ServerLogoutDone(Result<(), String>),
     LaunchResult(Result<String, String>),
     RobloxAppClosed,
+    RobloxBackgroundDetected { pid: u32, is_playing: bool },
+    RobloxBackgroundKilled { pid: u32 },
     GameVideoIdResolved(u64, Option<u64>),
     VideoPreviewLoaded(u64, Result<Arc<video_preview::DecodedPreviewVideo>, String>),
     WallpaperPicked(Option<String>),
     WallpaperLoaded(String, Result<egui::ColorImage, String>),
+    UpdateCheckResult(bool, Result<Option<(String, String)>, String>),
+    AppUpdateCheckResult(bool, Result<Option<crate::updater::RustBloxRelease>, String>),
+    AppPatchDone(
+        String,
+        Result<(Option<crate::updater::LiveHotfix>, Option<std::path::PathBuf>), String>,
+    ),
 }
 
 #[cfg(test)]

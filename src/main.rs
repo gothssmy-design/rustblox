@@ -10,6 +10,7 @@ mod telemetry;
 mod theme;
 mod types;
 mod ui;
+mod updater;
 mod video_preview;
 
 use std::env;
@@ -21,8 +22,15 @@ use auth::log;
 use roblox_process::launch_from_uri;
 
 fn main() -> eframe::Result<()> {
-    // Started by a roblox-player: link from the website? Launch the game and exit.
     let args: Vec<String> = env::args().collect();
+    if updater::try_run_quiet_apply_cli(&args) {
+        return Ok(());
+    }
+    if let Some(u_args) = updater::try_parse_updater_cli(&args) {
+        return updater::run_updater_window(u_args);
+    }
+    updater::cleanup_old_binary();
+    // Started by a roblox-player: link from the website? Launch the game and exit.
     if let Some(uri) = args.get(1) {
         if uri.starts_with("roblox-player:") {
             if let Err(e) = launch_from_uri(uri, false) {

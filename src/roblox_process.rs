@@ -422,6 +422,17 @@ pub fn close_tray_roblox_processes() -> usize {
     closed
 }
 
+pub fn kill_all_roblox_processes() -> usize {
+    let (procs, _) = enumerate_roblox_processes();
+    let mut closed = 0;
+    for p in procs {
+        if terminate_roblox_process(p.pid) {
+            closed += 1;
+        }
+    }
+    closed
+}
+
 pub fn start_roblox_watcher(
     tx: Sender<Msg>,
     ctx: egui::Context,
@@ -432,17 +443,20 @@ pub fn start_roblox_watcher(
     thread::spawn(move || {
         let mut seen_app_since: HashMap<u32, Instant> = HashMap::new();
         let mut recently_closed: HashMap<u32, Instant> = HashMap::new();
+        let mut reported_pids: HashSet<u32> = HashSet::new();
+        let mut notified_kill_pids: HashSet<u32> = HashSet::new();
         while !stop.load(Ordering::Relaxed) {
-            if !enabled.load(Ordering::Relaxed) {
+            let auto_close = enabled.load(Ordering::Relaxed);
+            if !auto_close {
                 seen_app_since.clear();
-                thread::sleep(Duration::from_millis(1500));
-                continue;
             }
             let (procs, crash_logs) = enumerate_roblox_processes();
             if procs.is_empty() {
                 seen_app_since.clear();
+                reported_pids.clear();
+                notified_kill_pids.clear();
                 recently_closed.retain(|_, t| t.elapsed() < Duration::from_secs(10));
-                thread::sleep(Duration::from_millis(1000));
+                thread::sleep(Duration::from_millis(if auto_close { 1000 } else { 1500 }));
                 continue;
             }
 
@@ -450,6 +464,8 @@ pub fn start_roblox_watcher(
             let launch_age_ms = now_ms.saturating_sub(last_launch_ms.load(Ordering::Relaxed));
             let active_pids: HashSet<u32> = procs.iter().map(|p| p.pid).collect();
             seen_app_since.retain(|pid, _| active_pids.contains(pid));
+            reported_pids.retain(|pid| active_pids.contains(pid));
+            notified_kill_pids.retain(|pid| active_pids.contains(pid));
             recently_closed.retain(|pid, t| active_pids.contains(pid) && t.elapsed() < Duration::from_secs(10));
 
             let logs_dir = roblox_logs_dir();
@@ -464,10 +480,14 @@ pub fn start_roblox_watcher(
                     0
                 };
 
-                // Always close lingering background tray process
-                if lower.contains("--launch-to-tray") {
+                // Always close lingering background tray process when auto_close is enabled
+                if auto_close && lower.contains("--launch-to-tray") {
                     if terminate_roblox_process(p.pid) {
                         recently_closed.insert(p.pid, Instant::now());
+                        if notified_kill_pids.insert(p.pid) {
+                            let _ = tx.send(Msg::RobloxBackgroundKilled { pid: p.pid });
+                            ctx.request_repaint();
+                        }
                     }
                     continue;
                 }
@@ -480,49 +500,63 @@ pub fn start_roblox_watcher(
                     && !lower.contains("launchmode:play")
                     && !lower.contains("placelauncher");
 
-                let should_close = match log_state {
-                    Some((LogSessionState::AppAfterPlay, _)) => {
-                        let first = seen_app_since.entry(p.pid).or_insert_with(Instant::now);
-                        if first.elapsed() >= Duration::from_millis(800) {
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                    Some((LogSessionState::TrayOnly, _)) => proc_age_ms >= 2_000,
-                    Some((LogSessionState::AppOnly, false)) => {
-                        if launch_age_ms >= 15_000 || explicit_app {
+                let is_playing = matches!(log_state, Some((LogSessionState::Playing, _)));
+
+                let should_close = if auto_close {
+                    match log_state {
+                        Some((LogSessionState::AppAfterPlay, _)) => {
                             let first = seen_app_since.entry(p.pid).or_insert_with(Instant::now);
-                            first.elapsed() >= Duration::from_millis(2_500)
-                        } else {
+                            first.elapsed() >= Duration::from_millis(800)
+                        }
+                        Some((LogSessionState::TrayOnly, _)) => proc_age_ms >= 2_000,
+                        Some((LogSessionState::AppOnly, false)) => {
+                            if launch_age_ms >= 15_000 || explicit_app {
+                                let first = seen_app_since.entry(p.pid).or_insert_with(Instant::now);
+                                first.elapsed() >= Duration::from_millis(2_500)
+                            } else {
+                                seen_app_since.remove(&p.pid);
+                                false
+                            }
+                        }
+                        Some((LogSessionState::Playing, _)) => {
                             seen_app_since.remove(&p.pid);
                             false
                         }
-                    }
-                    Some((LogSessionState::Playing, _)) => {
-                        seen_app_since.remove(&p.pid);
-                        false
-                    }
-                    _ => {
-                        if explicit_app && proc_age_ms >= 3_000 {
-                            let first = seen_app_since.entry(p.pid).or_insert_with(Instant::now);
-                            first.elapsed() >= Duration::from_millis(1_500)
-                        } else {
-                            false
+                        _ => {
+                            if (explicit_app || (launch_age_ms >= 15_000 && lower.is_empty()))
+                                && proc_age_ms >= 3_000
+                            {
+                                let first = seen_app_since.entry(p.pid).or_insert_with(Instant::now);
+                                first.elapsed() >= Duration::from_millis(2_000)
+                            } else {
+                                false
+                            }
                         }
                     }
+                } else {
+                    false
                 };
 
                 if should_close {
                     seen_app_since.remove(&p.pid);
+                    reported_pids.remove(&p.pid);
                     if terminate_roblox_process(p.pid) {
                         recently_closed.insert(p.pid, Instant::now());
-                        let _ = tx.send(Msg::RobloxAppClosed);
-                        ctx.request_repaint();
+                        if notified_kill_pids.insert(p.pid) {
+                            let _ = tx.send(Msg::RobloxBackgroundKilled { pid: p.pid });
+                            let _ = tx.send(Msg::RobloxAppClosed);
+                            ctx.request_repaint();
+                        }
                     }
+                } else if !auto_close && !is_playing && reported_pids.insert(p.pid) {
+                    let _ = tx.send(Msg::RobloxBackgroundDetected {
+                        pid: p.pid,
+                        is_playing,
+                    });
+                    ctx.request_repaint();
                 }
             }
-            thread::sleep(Duration::from_millis(500));
+            thread::sleep(Duration::from_millis(if auto_close { 500 } else { 1500 }));
         }
     });
 }

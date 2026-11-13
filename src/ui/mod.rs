@@ -1,5 +1,6 @@
 pub mod widgets;
 pub mod menu;
+pub mod notifications;
 pub mod page_home;
 pub mod page_charts;
 pub mod page_search;

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, RichText, Sense};
 
 use crate::avatar_3d::{self, Avatar3DState, load_avatar_3d_data};
-use crate::fastflags::{load_fastflags, sync_client_fastflags, FastFlagsConfig};
+use crate::fastflags::{load_fastflags, save_fastflags, sync_client_fastflags, FastFlagsConfig};
 use crate::types::*;
 use crate::theme::*;
 use crate::auth::*;
@@ -18,6 +18,7 @@ use crate::api::*;
 use crate::video_preview;
 use crate::ui::widgets::*;
 use crate::ui::menu::*;
+use crate::updater::*;
 
 pub struct RustBlox {
     pub ctx: egui::Context,
@@ -86,6 +87,32 @@ pub struct RustBlox {
     pub friend_search_verified: HashSet<u64>,
     pub friend_search_results: Option<Result<Vec<User>, String>>,
     pub friend_sent: HashSet<u64>,
+    pub social_tab: SocialTab,
+    pub social_lists: HashMap<SocialTab, Vec<User>>,
+    pub social_cursors: HashMap<SocialTab, Option<String>>,
+    pub social_loading: HashSet<SocialTab>,
+    pub social_loading_more: HashSet<SocialTab>,
+    pub social_errs: HashMap<SocialTab, String>,
+    pub social_responding: HashSet<u64>,
+    pub toasts: Vec<ToastNotification>,
+    pub next_toast_id: u64,
+    pub known_friend_requests: Option<HashSet<u64>>,
+    pub last_requests_poll: Option<Instant>,
+    pub update_checked: bool,
+    pub notification_history: Vec<NotificationItem>,
+    pub roblox_update_available: Option<(String, String)>,
+    pub seen_notifications: SeenNotifications,
+    pub notified_kill_pids: HashSet<u32>,
+    pub last_autokill_toast: Option<Instant>,
+    pub app_update_available: Option<RustBloxRelease>,
+    pub app_update_checking: bool,
+    pub app_update_checked: bool,
+    pub app_update_status: Option<String>,
+    pub app_update_downloading: bool,
+    pub app_update_progress: Option<(Arc<AtomicU64>, Arc<AtomicU64>)>,
+    pub app_update_error: Option<String>,
+    pub app_patch_applied: Option<String>,
+    pub app_staged_patch: Option<PathBuf>,
 
     pub username: String,
     pub me: Option<Profile>,
@@ -239,6 +266,32 @@ impl RustBlox {
             friend_search_verified: HashSet::new(),
             friend_search_results: None,
             friend_sent: HashSet::new(),
+            social_tab: SocialTab::Requests,
+            social_lists: HashMap::new(),
+            social_cursors: HashMap::new(),
+            social_loading: HashSet::new(),
+            social_loading_more: HashSet::new(),
+            social_errs: HashMap::new(),
+            social_responding: HashSet::new(),
+            toasts: Vec::new(),
+            next_toast_id: 0,
+            known_friend_requests: None,
+            last_requests_poll: None,
+            update_checked: false,
+            notification_history: Vec::new(),
+            roblox_update_available: None,
+            seen_notifications: load_seen_notifications(),
+            notified_kill_pids: HashSet::new(),
+            last_autokill_toast: None,
+            app_update_available: None,
+            app_update_checking: false,
+            app_update_checked: false,
+            app_update_status: None,
+            app_update_downloading: false,
+            app_update_progress: None,
+            app_update_error: None,
+            app_patch_applied: None,
+            app_staged_patch: None,
             username: String::new(),
             me: None,
             me_err: None,
@@ -362,6 +415,124 @@ impl RustBlox {
         self.spawn(move || Msg::SavedSynced(fetch_saved_synced(&cookie, uid, r, f)));
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_toast(
+        &mut self,
+        source: NotificationSource,
+        kind: ToastKind,
+        title: impl Into<String>,
+        body: impl Into<String>,
+        avatar: Option<String>,
+        primary_action: Option<(String, ToastAction)>,
+        secondary_action: Option<(String, ToastAction)>,
+        duration: f64,
+        show_popup: bool,
+    ) {
+        self.next_toast_id = self.next_toast_id.wrapping_add(1);
+        let id = self.next_toast_id;
+        let now = self.ctx.input(|i| i.time);
+        let title_s = title.into();
+        let body_s = body.into();
+
+        if self.notification_history.len() >= 50 {
+            self.notification_history.remove(0);
+        }
+        self.notification_history.push(NotificationItem {
+            id,
+            source,
+            kind,
+            title: title_s.clone(),
+            body: body_s.clone(),
+            avatar: avatar.clone(),
+            primary_action: primary_action.clone(),
+            secondary_action: secondary_action.clone(),
+            created_secs: now,
+            read: matches!(self.page, Page::Notifications),
+        });
+
+        if show_popup && !self.settings.notifications_silent {
+            if self.toasts.len() >= 4 {
+                self.toasts.remove(0);
+            }
+            self.toasts.push(ToastNotification {
+                id,
+                kind,
+                title: title_s,
+                body: body_s,
+                avatar,
+                primary_action,
+                secondary_action,
+                created_at: now,
+                duration,
+                paused_at: None,
+                dismissed_at: None,
+            });
+        }
+        self.ctx.request_repaint();
+    }
+
+    pub fn check_updates(&mut self, manual: bool) {
+        let player = self.player_path.clone();
+        if manual {
+            self.status = "Checking for Roblox updates...".to_string();
+        }
+        self.spawn(move || Msg::UpdateCheckResult(manual, check_roblox_update(player.as_deref())));
+    }
+
+    pub fn check_app_updates(&mut self, manual: bool) {
+        if self.app_update_checking || self.app_update_downloading {
+            return;
+        }
+        self.app_update_checking = true;
+        self.app_update_error = None;
+        if manual {
+            self.app_update_status = Some("Checking GitHub releases...".to_string());
+        }
+        self.spawn(move || Msg::AppUpdateCheckResult(manual, check_rustblox_update()));
+    }
+
+    pub fn start_app_update_download(&mut self, force_restart: bool) {
+        if self.app_update_downloading {
+            return;
+        }
+        let Some(release) = self.app_update_available.clone() else {
+            return;
+        };
+        if force_restart || release.kind == UpdateKind::Full {
+            if release.exe_url.is_none() {
+                let _ = open::that(&release.html_url);
+                return;
+            }
+            self.app_update_error = None;
+            match launch_updater_process(&release) {
+                Ok(()) => {
+                    self.app_staged_patch = None;
+                    self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                Err(e) => {
+                    self.app_update_error = Some(e.clone());
+                    self.status = format!("Updater launch failed: {e}");
+                }
+            }
+            return;
+        }
+
+        let ver = release.version.clone();
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let total = Arc::new(AtomicU64::new(release.exe_size));
+        self.app_update_progress = Some((Arc::clone(&downloaded), Arc::clone(&total)));
+        self.app_update_downloading = true;
+        self.app_update_error = None;
+        self.app_update_status = Some(format!("Applying patch v{ver} in background..."));
+        let ctx = self.ctx.clone();
+        self.spawn(move || {
+            Msg::AppPatchDone(
+                ver,
+                apply_small_patch_without_restart(&release, &downloaded, &total, &ctx),
+            )
+        });
+    }
+
     pub fn sync_auth_session(&mut self, force: bool) {
         let Some(cookie) = self.cookie.clone() else {
             return;
@@ -429,6 +600,18 @@ impl RustBlox {
         }
         if Self::is_stale(&self.last_auth_sync, &self.auth_sync_started, auth_interval) {
             self.sync_auth_session(false);
+        }
+        let req_interval = if gained_focus {
+            Duration::from_secs(12)
+        } else {
+            Duration::from_secs(45)
+        };
+        let req_stale = self
+            .last_requests_poll
+            .map_or(true, |t| t.elapsed() >= req_interval);
+        if req_stale && !self.social_loading.contains(&SocialTab::Requests) {
+            self.last_requests_poll = Some(Instant::now());
+            self.load_social_tab(SocialTab::Requests, false);
         }
     }
 
@@ -670,6 +853,16 @@ impl RustBlox {
         self.friend_search_verified.clear();
         self.friend_search_results = None;
         self.friend_sent.clear();
+        self.social_tab = SocialTab::Requests;
+        self.social_lists.clear();
+        self.social_cursors.clear();
+        self.social_loading.clear();
+        self.social_loading_more.clear();
+        self.social_errs.clear();
+        self.social_responding.clear();
+        self.known_friend_requests = None;
+        self.last_requests_poll = None;
+        self.notification_history.clear();
         self.search.clear();
         self.searched.clear();
         self.searching = false;
@@ -1364,6 +1557,191 @@ impl RustBlox {
                         }
                     }
                 }
+                Msg::SocialListLoaded { tab, append, res } => {
+                    if !logged_in {
+                        continue;
+                    }
+                    self.social_loading.remove(&tab);
+                    self.social_loading_more.remove(&tab);
+                    match res {
+                        Ok((users, next_cursor)) => {
+                            self.social_errs.remove(&tab);
+                            if tab == SocialTab::Friends {
+                                self.friends = users;
+                                self.friends_err = None;
+                                if let Some(prof) = &mut self.me {
+                                    prof.friends = self.friends.len() as u64;
+                                }
+                            } else {
+                                if !append && tab == SocialTab::Requests {
+                                    self.last_requests_poll = Some(Instant::now());
+                                    let current_ids: HashSet<u64> =
+                                        users.iter().map(|u| u.id).collect();
+                                    let viewing_requests = matches!(self.page, Page::AddFriend)
+                                        && self.social_tab == SocialTab::Requests;
+                                    let account_uid = self.me.as_ref().map(|p| p.user.id).unwrap_or(0);
+                                    let mut notify_single: Option<(u64, String, String, String)> = None;
+                                    let mut notify_group: Option<(usize, String, String)> = None;
+                                    let mut changed_seen = false;
+                                    {
+                                        let seen_set = self
+                                            .seen_notifications
+                                            .friend_requests_by_user
+                                            .entry(account_uid)
+                                            .or_default();
+                                        let unseen: Vec<&User> = users
+                                            .iter()
+                                            .filter(|u| !seen_set.contains(&u.id))
+                                            .collect();
+                                        if !unseen.is_empty() {
+                                            if !viewing_requests {
+                                                if unseen.len() == 1 {
+                                                    let u = unseen[0];
+                                                    let disp = if u.display.is_empty() {
+                                                        u.name.clone()
+                                                    } else {
+                                                        u.display.clone()
+                                                    };
+                                                    notify_single = Some((
+                                                        u.id,
+                                                        u.name.clone(),
+                                                        disp,
+                                                        u.headshot.clone(),
+                                                    ));
+                                                } else {
+                                                    let first = unseen[0];
+                                                    notify_group = Some((
+                                                        unseen.len(),
+                                                        first.name.clone(),
+                                                        first.headshot.clone(),
+                                                    ));
+                                                }
+                                            }
+                                            for u in unseen {
+                                                if seen_set.insert(u.id) {
+                                                    changed_seen = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if changed_seen {
+                                        save_seen_notifications(&self.seen_notifications);
+                                    }
+                                    if let Some((uid, uname, disp, headshot)) = notify_single {
+                                        self.push_toast(
+                                            NotificationSource::RobloxApi,
+                                            ToastKind::FriendRequest,
+                                            "Friend Request",
+                                            format!("{disp} (@{uname}) wants to add you."),
+                                            (!headshot.is_empty()).then_some(headshot),
+                                            Some((
+                                                "Accept".to_string(),
+                                                ToastAction::AcceptFriendRequest { uid, uname },
+                                            )),
+                                            Some(("View".to_string(), ToastAction::OpenRequests)),
+                                            8.5,
+                                            true,
+                                        );
+                                    } else if let Some((count, first_name, headshot)) = notify_group {
+                                        self.push_toast(
+                                            NotificationSource::RobloxApi,
+                                            ToastKind::FriendRequest,
+                                            format!("{count} Friend Requests"),
+                                            format!(
+                                                "@{first_name} and {} more waiting to accept.",
+                                                count - 1
+                                            ),
+                                            (!headshot.is_empty()).then_some(headshot),
+                                            Some((
+                                                "View Requests".to_string(),
+                                                ToastAction::OpenRequests,
+                                            )),
+                                            None,
+                                            8.5,
+                                            true,
+                                        );
+                                    }
+                                    self.known_friend_requests = Some(current_ids);
+                                }
+                                if append {
+                                    let entry = self.social_lists.entry(tab).or_default();
+                                    let seen: HashSet<u64> = entry.iter().map(|u| u.id).collect();
+                                    for u in users {
+                                        if !seen.contains(&u.id) {
+                                            entry.push(u);
+                                        }
+                                    }
+                                } else {
+                                    self.social_lists.insert(tab, users);
+                                }
+                                self.social_cursors.insert(tab, next_cursor);
+                            }
+                        }
+                        Err(e) => {
+                            if !append {
+                                self.social_errs.insert(tab, e);
+                            } else {
+                                self.status = format!("Could not load more {}: {e}", tab.label());
+                            }
+                        }
+                    }
+                }
+                Msg::FriendRequestResponded {
+                    uid,
+                    uname,
+                    accepted,
+                    res,
+                } => {
+                    if !logged_in {
+                        continue;
+                    }
+                    self.social_responding.remove(&uid);
+                    match res {
+                        Ok(()) => {
+                            if let Some(known) = &mut self.known_friend_requests {
+                                known.remove(&uid);
+                            }
+                            let account_uid = self.me.as_ref().map(|p| p.user.id).unwrap_or(0);
+                            if let Some(seen) = self
+                                .seen_notifications
+                                .friend_requests_by_user
+                                .get_mut(&account_uid)
+                            {
+                                if seen.remove(&uid) {
+                                    save_seen_notifications(&self.seen_notifications);
+                                }
+                            }
+                            let mut removed_user = None;
+                            if let Some(list) = self.social_lists.get_mut(&SocialTab::Requests) {
+                                if let Some(pos) = list.iter().position(|u| u.id == uid) {
+                                    removed_user = Some(list.remove(pos));
+                                }
+                            }
+                            if accepted {
+                                if let Some(mut u) = removed_user {
+                                    if !self.friends.iter().any(|f| f.id == u.id) {
+                                        if u.name.is_empty() {
+                                            u.name = uname.clone();
+                                        }
+                                        self.friends.insert(0, u);
+                                    }
+                                }
+                                if let Some(prof) = &mut self.me {
+                                    prof.friends = self.friends.len() as u64;
+                                }
+                                if let Some(fp) = &mut self.my_profile {
+                                    fp.friends = self.friends.len() as u64;
+                                }
+                                self.status = format!("Accepted friend request from @{uname}!");
+                            } else {
+                                self.status = format!("Declined friend request from @{uname}.");
+                            }
+                        }
+                        Err(e) => {
+                            self.status = format!("Could not update request from @{uname}: {e}");
+                        }
+                    }
+                }
                 Msg::AvatarLoaded(r) => {
                     if !logged_in {
                         continue;
@@ -1556,6 +1934,12 @@ impl RustBlox {
                             self.me_err = None;
                             self.friends = friends;
                             self.friends_err = None;
+                            if self.known_friend_requests.is_none()
+                                && !self.social_loading.contains(&SocialTab::Requests)
+                            {
+                                self.last_requests_poll = Some(Instant::now());
+                                self.load_social_tab(SocialTab::Requests, false);
+                            }
                             if matches!(self.page, Page::Avatar) {
                                 self.ensure_avatar_loaded();
                             }
@@ -1650,6 +2034,202 @@ impl RustBlox {
                     if logged_in {
                         self.sync_saved(true);
                         self.sync_auth_session(true);
+                    }
+                }
+                Msg::RobloxBackgroundDetected { pid, is_playing } => {
+                    if !is_playing
+                        && !self.settings.auto_close_roblox
+                        && self.notified_kill_pids.insert(pid)
+                        && self
+                            .last_autokill_toast
+                            .is_none_or(|t| t.elapsed() >= Duration::from_secs(30))
+                    {
+                        self.last_autokill_toast = Some(Instant::now());
+                        self.push_toast(
+                            NotificationSource::Process,
+                            ToastKind::Error,
+                            "Roblox Running in Background",
+                            format!("RobloxPlayerBeta.exe (PID {pid}) is open in the background."),
+                            None,
+                            Some(("Kill Process".to_string(), ToastAction::KillRoblox)),
+                            None,
+                            7.5,
+                            true,
+                        );
+                    }
+                }
+                Msg::RobloxBackgroundKilled { pid } => {
+                    self.status = format!("Closed background Roblox process (PID {pid}).");
+                    if self.notified_kill_pids.insert(pid)
+                        && self
+                            .last_autokill_toast
+                            .is_none_or(|t| t.elapsed() >= Duration::from_secs(30))
+                    {
+                        self.last_autokill_toast = Some(Instant::now());
+                        self.push_toast(
+                            NotificationSource::Process,
+                            ToastKind::Success,
+                            "Closed Background Roblox",
+                            format!("Terminated lingering Roblox process (PID {pid})."),
+                            None,
+                            None,
+                            None,
+                            5.0,
+                            true,
+                        );
+                    }
+                }
+                Msg::UpdateCheckResult(manual, res) => match res {
+                    Ok(Some((ver, upload))) => {
+                        self.roblox_update_available = Some((ver.clone(), upload.clone()));
+                        if manual {
+                            self.status = format!("Roblox update available: v{ver}");
+                        }
+                        if self.seen_notifications.update_uploads.insert(upload) {
+                            save_seen_notifications(&self.seen_notifications);
+                            self.push_toast(
+                                NotificationSource::RobloxApi,
+                                ToastKind::UpdateAvailable,
+                                "Roblox Update Available",
+                                format!(
+                                    "Version {ver} is live and newer than your installed Roblox build."
+                                ),
+                                None,
+                                Some((
+                                    "Download Update".to_string(),
+                                    ToastAction::OpenUrl(
+                                        "https://www.roblox.com/download/client".to_string(),
+                                    ),
+                                )),
+                                None,
+                                10.0,
+                                true,
+                            );
+                        }
+                    }
+                    Ok(None) => {
+                        self.roblox_update_available = None;
+                        if manual {
+                            self.status = "Roblox Player is up to date.".to_string();
+                        }
+                    }
+                    Err(e) => {
+                        if manual {
+                            self.status = format!("Update check failed: {e}");
+                        }
+                    }
+                },
+                Msg::AppUpdateCheckResult(manual, res) => {
+                    self.app_update_checking = false;
+                    match res {
+                        Ok(Some(release)) => {
+                            let ver = release.version.clone();
+                            let key = format!("rustblox:{}", release.tag_name);
+                            self.app_update_status = Some(format!("Update available: v{ver}"));
+                            self.app_update_available = Some(release.clone());
+                            if manual {
+                                self.status = format!("RustBlox v{ver} is available!");
+                            }
+                            if self.seen_notifications.update_uploads.insert(key) {
+                                save_seen_notifications(&self.seen_notifications);
+                                self.push_toast(
+                                    NotificationSource::RustBlox,
+                                    ToastKind::UpdateAvailable,
+                                    format!("RustBlox v{ver} Available"),
+                                    if release.notes.is_empty() {
+                                        "New RustBlox update ready. Click below to update inside Settings."
+                                            .to_string()
+                                    } else {
+                                        release
+                                            .notes
+                                            .lines()
+                                            .find(|l| !l.trim().is_empty())
+                                            .unwrap_or("New RustBlox update ready.")
+                                            .trim()
+                                            .chars()
+                                            .take(90)
+                                            .collect()
+                                    },
+                                    None,
+                                    Some(("Update in Settings".to_string(), ToastAction::OpenSettings)),
+                                    None,
+                                    10.0,
+                                    true,
+                                );
+                            }
+                        }
+                        Ok(None) => {
+                            self.app_update_available = None;
+                            if manual {
+                                let msg = format!(
+                                    "You are on the latest version (v{}).",
+                                    env!("CARGO_PKG_VERSION")
+                                );
+                                self.app_update_status = Some(msg.clone());
+                                self.status = msg;
+                            } else {
+                                self.app_update_status = Some(format!(
+                                    "Up to date (v{})",
+                                    env!("CARGO_PKG_VERSION")
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            self.app_update_error = if manual { Some(e.clone()) } else { None };
+                            if manual {
+                                self.app_update_status = None;
+                                self.status = format!("RustBlox update check failed: {e}");
+                            }
+                        }
+                    }
+                }
+                Msg::AppPatchDone(ver, res) => {
+                    self.app_update_downloading = false;
+                    match res {
+                        Ok((hotfix, staged)) => {
+                            let mut note = None;
+                            if let Some(hf) = hotfix {
+                                let mut ff_changed = false;
+                                for (k, v) in hf.fastflag_overrides {
+                                    self.fastflags.custom_flags.insert(k, v);
+                                    ff_changed = true;
+                                }
+                                if ff_changed {
+                                    let _ = save_fastflags(&self.fastflags);
+                                    let _ = sync_client_fastflags(
+                                        &self.fastflags,
+                                        self.settings.target_fps,
+                                        &[],
+                                    );
+                                }
+                                if let Some(auto_kill) = hf.auto_close_roblox {
+                                    self.settings.auto_close_roblox = auto_kill;
+                                    save_settings(&self.settings);
+                                    self.auto_close_flag.store(auto_kill, Ordering::Relaxed);
+                                }
+                                note = hf.status_note;
+                            }
+                            if let Some(staged_path) = staged {
+                                self.app_staged_patch = Some(staged_path);
+                            }
+                            self.app_patch_applied = Some(ver.clone());
+                            let summary = note.unwrap_or_else(|| {
+                                if self.app_staged_patch.is_some() {
+                                    format!(
+                                        "Patch v{ver} applied — no restart needed (finishes on exit)."
+                                    )
+                                } else {
+                                    format!("Patch v{ver} applied live.")
+                                }
+                            });
+                            self.app_update_status = Some(summary.clone());
+                            self.status = summary;
+                        }
+                        Err(e) => {
+                            self.app_update_error = Some(e.clone());
+                            self.app_update_status = None;
+                            self.status = format!("Patch failed: {e}");
+                        }
                     }
                 }
             }
@@ -1809,6 +2389,46 @@ impl RustBlox {
         self.game_passes_err = None;
         self.spawn(move || {
             Msg::GamePassesLoaded(universe_id, fetch_game_passes(universe_id, cookie.as_deref()))
+        });
+    }
+
+    pub fn load_social_tab(&mut self, tab: SocialTab, append: bool) {
+        if self.social_loading.contains(&tab) || self.social_loading_more.contains(&tab) {
+            return;
+        }
+        let cursor = if append {
+            let Some(Some(c)) = self.social_cursors.get(&tab).cloned() else {
+                return;
+            };
+            Some(c)
+        } else {
+            None
+        };
+        let Some(cookie) = self.cookie.clone() else {
+            return;
+        };
+        let my_id = self.me.as_ref().map(|p| p.user.id).unwrap_or(0);
+        if tab != SocialTab::Requests && my_id == 0 {
+            return;
+        }
+        if append {
+            self.social_loading_more.insert(tab);
+        } else {
+            self.social_loading.insert(tab);
+            self.social_errs.remove(&tab);
+        }
+        self.spawn(move || {
+            let res = match tab {
+                SocialTab::Requests => fetch_friend_requests_api(cursor.as_deref(), &cookie),
+                SocialTab::Friends => fetch_user_friends(my_id, Some(&cookie)).map(|u| (u, None)),
+                SocialTab::Followers => {
+                    fetch_follow_list_api(my_id, false, cursor.as_deref(), Some(&cookie))
+                }
+                SocialTab::Following => {
+                    fetch_follow_list_api(my_id, true, cursor.as_deref(), Some(&cookie))
+                }
+            };
+            Msg::SocialListLoaded { tab, append, res }
         });
     }
 
@@ -2019,6 +2639,14 @@ impl eframe::App for RustBlox {
         if self.poll() {
             ui.ctx().request_repaint();
         }
+        if !self.update_checked {
+            self.update_checked = true;
+            self.check_updates(false);
+        }
+        if !self.app_update_checked {
+            self.app_update_checked = true;
+            self.check_app_updates(false);
+        }
         self.maybe_auto_sync(ui.ctx());
         if matches!(self.page, Page::Settings) {
             let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
@@ -2064,9 +2692,14 @@ impl eframe::App for RustBlox {
 
         // Left sidebar (only shown when logged in)
         if logged_in {
+            let unread_notifs = self
+                .notification_history
+                .iter()
+                .filter(|n| !n.read)
+                .count();
             egui::Panel::left("nav")
                 .resizable(false)
-                .exact_size(74.0)
+                .exact_size(78.0)
                 .show_separator_line(false)
                 .frame(egui::Frame::new().fill(chrome_fill).inner_margin(4))
                 .show(ui, |ui| {
@@ -2083,6 +2716,16 @@ impl eframe::App for RustBlox {
                     }
                     if nav_item(ui, NavIcon::Avatar, "Avatar", matches!(page, Page::Avatar)) {
                         acts.push(Action::Go(Page::Avatar));
+                    }
+                    if nav_item_badged(
+                        ui,
+                        NavIcon::Notifications,
+                        "Notifications",
+                        matches!(page, Page::Notifications),
+                        unread_notifs,
+                        self.settings.notifications_silent,
+                    ) {
+                        acts.push(Action::Go(Page::Notifications));
                     }
                     if nav_item(ui, NavIcon::Settings, "Settings", matches!(page, Page::Settings)) {
                         acts.push(Action::Go(Page::Settings));
@@ -2468,8 +3111,9 @@ impl eframe::App for RustBlox {
                                 Page::AddFriend => (5, 0),
                                 Page::Profile => (6, 0),
                                 Page::Avatar => (7, 0),
-                                Page::Settings => (8, 0),
-                                Page::Login => (9, 0),
+                                Page::Notifications => (8, 0),
+                                Page::Settings => (9, 0),
+                                Page::Login => (10, 0),
                             };
                             let anim_state_id = egui::Id::NULL.with("page_transition_state");
                             let now = ui.input(|i| i.time);
@@ -2503,6 +3147,7 @@ impl eframe::App for RustBlox {
                                 Page::AddFriend => self.page_add_friend(ui, &mut acts),
                                 Page::Profile => self.page_my_profile(ui, &mut acts),
                                 Page::Avatar => self.page_avatar(ui, &mut acts),
+                                Page::Notifications => self.page_notifications(ui, &mut acts),
                                 Page::Settings => self.page_settings(ui, &mut acts),
                                 Page::Login => self.page_login(ui, &mut acts),
                             }
@@ -2518,6 +3163,8 @@ impl eframe::App for RustBlox {
         if refresh_auth {
             self.sync_auth_session(true);
         }
+
+        self.render_notifications(ui.ctx(), &mut acts);
 
         let hovered_game = acts.iter().find_map(|a| {
             if let Action::HoverGame(uid) = a {
@@ -2537,6 +3184,14 @@ impl eframe::App for RustBlox {
                 Action::SwitchAccount(uid) => self.switch_account(uid),
                 Action::RemoveAccount(uid) => self.remove_saved_account(uid),
                 Action::SignOut => self.sign_out(),
+                Action::KillRobloxProcesses => {
+                    let killed = kill_all_roblox_processes();
+                    if killed > 0 {
+                        self.status = format!("Closed {killed} Roblox process(es).");
+                    } else {
+                        self.status = "No background Roblox processes found.".to_string();
+                    }
+                }
                 Action::OpenUrl(u) => {
                     if let Err(e) = open::that(&u) {
                         self.status = format!("Error: {e}");
@@ -2952,6 +3607,64 @@ impl eframe::App for RustBlox {
                         self.back = self.page.clone();
                     }
                     self.page = Page::AddFriend;
+                    if !self.social_lists.contains_key(&SocialTab::Requests)
+                        && !self.social_loading.contains(&SocialTab::Requests)
+                    {
+                        self.load_social_tab(SocialTab::Requests, false);
+                    }
+                    let tab = self.social_tab;
+                    if tab != SocialTab::Requests
+                        && tab != SocialTab::Friends
+                        && !self.social_lists.contains_key(&tab)
+                        && !self.social_loading.contains(&tab)
+                    {
+                        self.load_social_tab(tab, false);
+                    }
+                }
+                Action::SelectSocialTab(tab) => {
+                    self.social_tab = tab;
+                    if tab != SocialTab::Friends
+                        && !self.social_lists.contains_key(&tab)
+                        && !self.social_loading.contains(&tab)
+                    {
+                        self.load_social_tab(tab, false);
+                    }
+                }
+                Action::RefreshSocialTab(tab) => {
+                    self.load_social_tab(tab, false);
+                }
+                Action::LoadMoreSocialTab(tab) => {
+                    self.load_social_tab(tab, true);
+                }
+                Action::AcceptFriendRequest(uid, uname) => {
+                    if self.social_responding.insert(uid) {
+                        if let Some(cookie) = self.cookie.clone() {
+                            self.status = format!("Accepting @{uname}...");
+                            self.spawn(move || Msg::FriendRequestResponded {
+                                uid,
+                                uname,
+                                accepted: true,
+                                res: respond_friend_request_api(uid, true, &cookie),
+                            });
+                        } else {
+                            self.social_responding.remove(&uid);
+                        }
+                    }
+                }
+                Action::DeclineFriendRequest(uid, uname) => {
+                    if self.social_responding.insert(uid) {
+                        if let Some(cookie) = self.cookie.clone() {
+                            self.status = format!("Declining @{uname}...");
+                            self.spawn(move || Msg::FriendRequestResponded {
+                                uid,
+                                uname,
+                                accepted: false,
+                                res: respond_friend_request_api(uid, false, &cookie),
+                            });
+                        } else {
+                            self.social_responding.remove(&uid);
+                        }
+                    }
                 }
                 Action::SearchUsers(q) => {
                     let q = q.trim().to_string();
@@ -3036,6 +3749,9 @@ impl eframe::App for RustBlox {
         self.auto_close_flag.store(false, Ordering::Relaxed);
         if self.settings.auto_close_roblox {
             close_tray_roblox_processes();
+        }
+        if let Some(staged) = self.app_staged_patch.take() {
+            launch_quiet_apply_on_exit(&staged);
         }
     }
 }

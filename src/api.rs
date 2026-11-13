@@ -1155,6 +1155,106 @@ pub fn send_friend_request_api(user_id: u64, cookie: &str) -> Result<(), String>
     Ok(())
 }
 
+pub fn respond_friend_request_api(
+    user_id: u64,
+    accept: bool,
+    cookie: &str,
+) -> Result<(), String> {
+    let endpoint = if accept {
+        "accept-friend-request"
+    } else {
+        "decline-friend-request"
+    };
+    post_csrf(
+        &format!("https://friends.roblox.com/v1/users/{user_id}/{endpoint}"),
+        serde_json::json!({}),
+        Some(cookie),
+        Some("https://www.roblox.com/"),
+    )?;
+    Ok(())
+}
+
+fn parse_social_user_page(
+    v: &Value,
+    cookie: Option<&str>,
+) -> Result<(Vec<User>, Option<String>), String> {
+    let mut users: Vec<User> = Vec::new();
+    let mut seen = HashSet::new();
+    let mut missing_ids = Vec::new();
+
+    for u in v["data"].as_array().into_iter().flatten() {
+        let Some(id) = u["id"].as_u64() else { continue };
+        if !seen.insert(id) {
+            continue;
+        }
+        let name = str_of(&u["name"]);
+        let disp = str_of(&u["displayName"]);
+        if name.is_empty() {
+            missing_ids.push(id);
+        }
+        users.push(User {
+            id,
+            name: name.clone(),
+            display: if disp.is_empty() { name } else { disp },
+            headshot: String::new(),
+            presence: 0,
+            location: String::new(),
+            place_id: None,
+            verified: u["hasVerifiedBadge"].as_bool().unwrap_or(false),
+        });
+    }
+
+    if !missing_ids.is_empty() {
+        if let Ok(resolved) = fetch_users_by_ids(&missing_ids, cookie) {
+            let map: HashMap<u64, User> = resolved.into_iter().map(|u| (u.id, u)).collect();
+            for u in &mut users {
+                if let Some(full) = map.get(&u.id) {
+                    *u = full.clone();
+                }
+            }
+        }
+    }
+
+    enrich_users(&mut users, cookie);
+    let next_cursor = v["nextPageCursor"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    Ok((users, next_cursor))
+}
+
+pub fn fetch_friend_requests_api(
+    cursor: Option<&str>,
+    cookie: &str,
+) -> Result<(Vec<User>, Option<String>), String> {
+    let mut url =
+        "https://friends.roblox.com/v1/my/friends/requests?sortOrder=Desc&limit=100".to_string();
+    if let Some(c) = cursor.filter(|s| !s.is_empty()) {
+        url.push_str("&cursor=");
+        url.push_str(&enc(c));
+    }
+    let v = auth_get_json(&url, Some(cookie))?;
+    parse_social_user_page(&v, Some(cookie))
+}
+
+pub fn fetch_follow_list_api(
+    user_id: u64,
+    following: bool,
+    cursor: Option<&str>,
+    cookie: Option<&str>,
+) -> Result<(Vec<User>, Option<String>), String> {
+    let kind = if following { "followings" } else { "followers" };
+    let mut url = format!(
+        "https://friends.roblox.com/v1/users/{user_id}/{kind}?limit=100&sortOrder=Desc"
+    );
+    if let Some(c) = cursor.filter(|s| !s.is_empty()) {
+        url.push_str("&cursor=");
+        url.push_str(&enc(c));
+    }
+    let v = auth_get_json(&url, cookie)?;
+    parse_social_user_page(&v, cookie)
+}
+
 pub fn build_profile(mut user: User) -> Profile {
     enrich_users(std::slice::from_mut(&mut user), None);
     let friends = get_json(&format!(
@@ -1446,6 +1546,60 @@ pub fn fetch_robux_balance(user_id: u64, cookie: &str) -> Option<u64> {
     None
 }
 
+pub fn fetch_user_friends(id: u64, cookie: Option<&str>) -> Result<Vec<User>, String> {
+    let v = auth_get_json(
+        &format!("https://friends.roblox.com/v1/users/{id}/friends"),
+        cookie,
+    )?;
+    let mut friends: Vec<User> = v["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|u| {
+            let name = str_of(&u["name"]);
+            let disp = str_of(&u["displayName"]);
+            Some(User {
+                id: u["id"].as_u64()?,
+                name: name.clone(),
+                display: if disp.is_empty() { name } else { disp },
+                headshot: String::new(),
+                presence: 0,
+                location: String::new(),
+                place_id: None,
+                verified: u["hasVerifiedBadge"].as_bool().unwrap_or(false),
+            })
+        })
+        .collect();
+    enrich_users(&mut friends, cookie);
+
+    if friends.is_empty() {
+        if let Ok(v) = auth_get_json(
+            &format!("https://friends.roblox.com/v1/users/{id}/friends/find?limit=50"),
+            cookie,
+        ) {
+            let ids: Vec<u64> = v["PageItems"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|x| x["id"].as_u64())
+                .collect();
+            if !ids.is_empty() {
+                if let Ok(list) = fetch_users_by_ids(&ids, cookie) {
+                    friends = list;
+                }
+            }
+        }
+    }
+
+    friends.sort_by_key(|f| match f.presence {
+        2 => 0,
+        1 => 1,
+        3 => 2,
+        _ => 3,
+    });
+    Ok(friends)
+}
+
 pub fn fetch_authenticated_session(cookie: &str) -> Result<(Profile, Vec<User>), String> {
     let me_json = auth_get_json("https://users.roblox.com/v1/users/authenticated", Some(cookie))?;
     let id = me_json["id"]
@@ -1464,59 +1618,7 @@ pub fn fetch_authenticated_session(cookie: &str) -> Result<(Profile, Vec<User>),
     let mut profile = build_profile(user);
     profile.robux = fetch_robux_balance(id, cookie);
 
-    let mut friends = match auth_get_json(
-        &format!("https://friends.roblox.com/v1/users/{id}/friends"),
-        Some(cookie),
-    ) {
-        Ok(v) => {
-            let mut list: Vec<User> = v["data"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|u| {
-                    Some(User {
-                        id: u["id"].as_u64()?,
-                        name: str_of(&u["name"]),
-                        display: str_of(&u["displayName"]),
-                        headshot: String::new(),
-                        presence: 0,
-                        location: String::new(),
-                        place_id: None,
-                        verified: u["hasVerifiedBadge"].as_bool().unwrap_or(false),
-                    })
-                })
-                .collect();
-            enrich_users(&mut list, Some(cookie));
-            list
-        }
-        Err(_) => Vec::new(),
-    };
-
-    if friends.is_empty() {
-        if let Ok(v) = auth_get_json(
-            &format!("https://friends.roblox.com/v1/users/{id}/friends/find?limit=50"),
-            Some(cookie),
-        ) {
-            let ids: Vec<u64> = v["PageItems"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|x| x["id"].as_u64())
-                .collect();
-            if !ids.is_empty() {
-                if let Ok(list) = fetch_users_by_ids(&ids, Some(cookie)) {
-                    friends = list;
-                }
-            }
-        }
-    }
-
-    friends.sort_by_key(|f| match f.presence {
-        2 => 0,
-        1 => 1,
-        3 => 2,
-        _ => 3,
-    });
+    let friends = fetch_user_friends(id, Some(cookie)).unwrap_or_default();
 
     Ok((profile, friends))
 }
@@ -2380,4 +2482,58 @@ pub fn start_quick_login(tx: Sender<Msg>, ctx: egui::Context) -> Arc<AtomicBool>
         }
     });
     cancel
+}
+
+pub fn parse_client_version_update(
+    v: &Value,
+    local_version_folder: Option<&str>,
+) -> Option<(String, String)> {
+    let upload = str_of(&v["clientVersionUpload"]);
+    let version = str_of(&v["version"]);
+    let local = local_version_folder?.trim();
+    if upload.is_empty() || local.is_empty() || local.eq_ignore_ascii_case(&upload) {
+        return None;
+    }
+    Some((
+        if version.is_empty() {
+            upload.clone()
+        } else {
+            version
+        },
+        upload,
+    ))
+}
+
+pub fn check_roblox_update(local_player: Option<&std::path::Path>) -> Result<Option<(String, String)>, String> {
+    let local_folder = local_player
+        .and_then(|p| p.parent())
+        .and_then(|d| d.file_name())
+        .and_then(|s| s.to_str());
+    if local_folder.is_none() {
+        return Ok(None);
+    }
+    let v = get_json("https://clientsettings.roblox.com/v2/client-version/WindowsPlayer")?;
+    Ok(parse_client_version_update(&v, local_folder))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_roblox_client_update_when_version_differs() {
+        let json = serde_json::json!({
+            "version": "0.699.0.6990001",
+            "clientVersionUpload": "version-new123456"
+        });
+        assert_eq!(
+            parse_client_version_update(&json, Some("version-old999999")),
+            Some(("0.699.0.6990001".to_string(), "version-new123456".to_string()))
+        );
+        assert_eq!(
+            parse_client_version_update(&json, Some("version-new123456")),
+            None
+        );
+        assert_eq!(parse_client_version_update(&json, None), None);
+    }
 }

@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -108,6 +109,7 @@ pub fn load_settings() -> Settings {
         text_border_color: read_opt_rgb(&v, "text_border_color"),
         target_fps: v["target_fps"].as_u64().and_then(|n| u32::try_from(n).ok()),
         auto_close_roblox: v["auto_close_roblox"].as_bool().unwrap_or(true),
+        notifications_silent: v["notifications_silent"].as_bool().unwrap_or(false),
     }
 }
 
@@ -137,6 +139,7 @@ pub fn save_settings(s: &Settings) {
         "text_border_color": opt_rgb_json(s.text_border_color),
         "target_fps": s.target_fps,
         "auto_close_roblox": s.auto_close_roblox,
+        "notifications_silent": s.notifications_silent,
     });
     if let Ok(text) = serde_json::to_string_pretty(&v) {
         let _ = fs::write(data_dir().join("settings.json"), text);
@@ -341,6 +344,81 @@ pub fn remove_stored_account(accounts: &mut Vec<StoredAccount>, user_id: u64) ->
     Some(accounts.remove(pos))
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SeenNotifications {
+    pub update_uploads: HashSet<String>,
+    pub friend_requests_by_user: HashMap<u64, HashSet<u64>>,
+}
+
+impl SeenNotifications {
+    pub fn from_json_str(text: &str) -> Self {
+        let Ok(v) = serde_json::from_str::<Value>(text) else {
+            return Self::default();
+        };
+        let update_uploads = v["update_uploads"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+            .filter(|s| !s.is_empty())
+            .collect();
+        let mut friend_requests_by_user: HashMap<u64, HashSet<u64>> = HashMap::new();
+        if let Some(obj) = v["friend_requests_by_user"].as_object() {
+            for (k, arr) in obj {
+                let Ok(owner_id) = k.parse::<u64>() else {
+                    continue;
+                };
+                let ids: HashSet<u64> = arr
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|x| x.as_u64())
+                    .filter(|&id| id != 0)
+                    .collect();
+                if !ids.is_empty() {
+                    friend_requests_by_user.insert(owner_id, ids);
+                }
+            }
+        }
+        Self {
+            update_uploads,
+            friend_requests_by_user,
+        }
+    }
+
+    pub fn to_json_value(&self) -> Value {
+        let mut updates: Vec<&str> = self.update_uploads.iter().map(|s| s.as_str()).collect();
+        updates.sort_unstable();
+        let mut fr_map = serde_json::Map::new();
+        for (&owner_id, set) in &self.friend_requests_by_user {
+            if set.is_empty() {
+                continue;
+            }
+            let mut ids: Vec<u64> = set.iter().copied().collect();
+            ids.sort_unstable();
+            fr_map.insert(owner_id.to_string(), json!(ids));
+        }
+        json!({
+            "update_uploads": updates,
+            "friend_requests_by_user": Value::Object(fr_map),
+        })
+    }
+}
+
+pub fn load_seen_notifications() -> SeenNotifications {
+    let path = data_dir().join("seen_notifications.json");
+    let Ok(text) = fs::read_to_string(path) else {
+        return SeenNotifications::default();
+    };
+    SeenNotifications::from_json_str(&text)
+}
+
+pub fn save_seen_notifications(seen: &SeenNotifications) {
+    if let Ok(text) = serde_json::to_string_pretty(&seen.to_json_value()) {
+        let _ = fs::write(data_dir().join("seen_notifications.json"), text);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,5 +455,23 @@ mod tests {
         assert!(removed.is_some());
         assert_eq!(vault.len(), 1);
         assert_eq!(vault[0].id, 202);
+    }
+
+    #[test]
+    fn seen_notifications_roundtrip_and_dedup() {
+        let mut seen = SeenNotifications::default();
+        assert!(seen.update_uploads.insert("version-abc123".to_string()));
+        assert!(!seen.update_uploads.insert("version-abc123".to_string()));
+        let reqs = seen.friend_requests_by_user.entry(42).or_default();
+        reqs.insert(1001);
+        reqs.insert(1002);
+
+        let serialized = seen.to_json_value().to_string();
+        let parsed = SeenNotifications::from_json_str(&serialized);
+        assert_eq!(parsed, seen);
+        assert!(parsed.update_uploads.contains("version-abc123"));
+        assert!(parsed.friend_requests_by_user[&42].contains(&1001));
+        assert!(parsed.friend_requests_by_user[&42].contains(&1002));
+        assert!(!parsed.friend_requests_by_user[&42].contains(&1003));
     }
 }
