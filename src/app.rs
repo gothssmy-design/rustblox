@@ -133,6 +133,11 @@ pub struct RustBlox {
     pub game_servers_err: Option<String>,
     pub server_sort: ServerSort,
     pub server_exclude_full: bool,
+
+    pub wallpaper_tex: Option<(String, egui::TextureHandle)>,
+    pub wallpaper_loading: Option<String>,
+    pub wallpaper_err: Option<String>,
+    pub settings_advanced_open: bool,
 }
 
 
@@ -144,7 +149,7 @@ impl RustBlox {
         let logged_in = cookie.is_some();
         let settings = load_settings();
         install_fonts(&cc.egui_ctx);
-        apply_theme(&cc.egui_ctx, settings.dark);
+        apply_theme(&cc.egui_ctx, &settings);
         let auto_close_flag = Arc::new(AtomicBool::new(settings.auto_close_roblox));
         let watcher_stop = Arc::new(AtomicBool::new(false));
         let last_roblox_launch_ms = Arc::new(AtomicU64::new(0));
@@ -261,7 +266,15 @@ impl RustBlox {
             game_servers_err: None,
             server_sort: ServerSort::Default,
             server_exclude_full: false,
+            wallpaper_tex: None,
+            wallpaper_loading: None,
+            wallpaper_err: None,
+            settings_advanced_open: false,
         };
+        if app.settings.bg_mode == BgMode::Wallpaper && !app.settings.bg_wallpaper.trim().is_empty() {
+            let path = app.settings.bg_wallpaper.clone();
+            app.request_wallpaper_load(path);
+        }
         if app.cookie.is_some() {
             app.sync_sorts(true);
             app.sync_saved(true);
@@ -887,6 +900,37 @@ impl RustBlox {
                         }
                         if self.hover_play_start.is_none() {
                             self.hover_play_start = Some(Instant::now());
+                        }
+                    }
+                }
+                Msg::WallpaperPicked(path_opt) => {
+                    if let Some(path) = path_opt {
+                        self.settings.bg_mode = BgMode::Wallpaper;
+                        self.settings.bg_wallpaper = path.clone();
+                        save_settings(&self.settings);
+                        apply_theme(&self.ctx, &self.settings);
+                        self.request_wallpaper_load(path);
+                    }
+                }
+                Msg::WallpaperLoaded(path, res) => {
+                    if self.wallpaper_loading.as_deref() == Some(path.as_str()) {
+                        self.wallpaper_loading = None;
+                    }
+                    if path == self.settings.bg_wallpaper {
+                        match res {
+                            Ok(img) => {
+                                let tex = self.ctx.load_texture(
+                                    "app_wallpaper",
+                                    img,
+                                    egui::TextureOptions::LINEAR,
+                                );
+                                self.wallpaper_tex = Some((path, tex));
+                                self.wallpaper_err = None;
+                            }
+                            Err(e) => {
+                                self.wallpaper_tex = None;
+                                self.wallpaper_err = Some(e);
+                            }
                         }
                     }
                 }
@@ -1712,6 +1756,116 @@ impl RustBlox {
         }
     }
 
+    pub fn request_wallpaper_load(&mut self, path: String) {
+        let trimmed = path.trim().to_string();
+        if trimmed.is_empty() {
+            self.wallpaper_tex = None;
+            self.wallpaper_loading = None;
+            self.wallpaper_err = None;
+            return;
+        }
+        self.wallpaper_loading = Some(trimmed.clone());
+        self.wallpaper_err = None;
+        self.spawn(move || {
+            let res = (|| -> Result<egui::ColorImage, String> {
+                let bytes = fs::read(&trimmed).map_err(|e| format!("Could not read image: {e}"))?;
+                let mut dyn_img = image::load_from_memory(&bytes)
+                    .map_err(|e| format!("Unsupported or invalid image: {e}"))?;
+                if dyn_img.width() > 1920 || dyn_img.height() > 1080 {
+                    dyn_img = dyn_img.resize(1920, 1080, image::imageops::FilterType::Triangle);
+                }
+                let rgba = dyn_img.to_rgba8();
+                let size = [rgba.width() as usize, rgba.height() as usize];
+                Ok(egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
+            })();
+            Msg::WallpaperLoaded(trimmed, res)
+        });
+    }
+
+    pub fn open_wallpaper_picker(&mut self) {
+        self.spawn(|| {
+            use std::os::windows::process::CommandExt;
+            let script = concat!(
+                "Add-Type -AssemblyName System.Windows.Forms;",
+                "$d = New-Object System.Windows.Forms.OpenFileDialog;",
+                "$d.Title = 'Select Background Wallpaper';",
+                "$d.Filter = 'Image Files|*.png;*.jpg;*.jpeg;*.webp;*.bmp|All Files|*.*';",
+                "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ",
+                "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ",
+                "Write-Output $d.FileName }"
+            );
+            let out = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Sta", "-Command", script])
+                .creation_flags(0x08000000)
+                .output();
+            let picked = out.ok().and_then(|o| {
+                if !o.status.success() {
+                    return None;
+                }
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if s.is_empty() { None } else { Some(s) }
+            });
+            Msg::WallpaperPicked(picked)
+        });
+    }
+
+    pub fn paint_app_background(&self, ctx: &egui::Context) {
+        if self.settings.bg_mode == BgMode::ThemeDefault {
+            return;
+        }
+        let screen_rect = ctx.input(|i| i.content_rect());
+        if !screen_rect.is_positive() {
+            return;
+        }
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        match self.settings.bg_mode {
+            BgMode::ThemeDefault => {}
+            BgMode::SolidColor => {
+                let [r, g, b] = self.settings.bg_color;
+                painter.rect_filled(screen_rect, 0.0, egui::Color32::from_rgb(r, g, b));
+            }
+            BgMode::Wallpaper => {
+                let base = Palette::of(self.settings.dark).bg;
+                painter.rect_filled(screen_rect, 0.0, base);
+                if let Some((_, tex)) = &self.wallpaper_tex {
+                    let img_sz = tex.size_vec2();
+                    let uv = if img_sz.x > 0.0 && img_sz.y > 0.0 {
+                        let win_aspect = screen_rect.width() / screen_rect.height().max(1.0);
+                        let img_aspect = img_sz.x / img_sz.y;
+                        if img_aspect > win_aspect {
+                            let u_span = (win_aspect / img_aspect).clamp(0.01, 1.0);
+                            let u_pad = (1.0 - u_span) * 0.5;
+                            egui::Rect::from_min_max(
+                                egui::pos2(u_pad, 0.0),
+                                egui::pos2(1.0 - u_pad, 1.0),
+                            )
+                        } else {
+                            let v_span = (img_aspect / win_aspect).clamp(0.01, 1.0);
+                            let v_pad = (1.0 - v_span) * 0.5;
+                            egui::Rect::from_min_max(
+                                egui::pos2(0.0, v_pad),
+                                egui::pos2(1.0, 1.0 - v_pad),
+                            )
+                        }
+                    } else {
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
+                    };
+                    painter.image(tex.id(), screen_rect, uv, egui::Color32::WHITE);
+
+                    let alpha = (self.settings.bg_overlay.clamp(0.0, 0.85) * 255.0).round() as u8;
+                    if alpha > 0 {
+                        let scrim = if self.settings.dark {
+                            egui::Color32::from_rgba_unmultiplied(12, 14, 19, alpha)
+                        } else {
+                            egui::Color32::from_rgba_unmultiplied(248, 250, 252, alpha)
+                        };
+                        painter.rect_filled(screen_rect, 0.0, scrim);
+                    }
+                }
+            }
+        }
+    }
+
 }
 
 impl eframe::App for RustBlox {
@@ -1720,8 +1874,43 @@ impl eframe::App for RustBlox {
             ui.ctx().request_repaint();
         }
         self.maybe_auto_sync(ui.ctx());
+        if matches!(self.page, Page::Settings) {
+            let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .map(|f| f.path().to_path_buf())
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .collect()
+            });
+            if let Some(img_path) = dropped.into_iter().find(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| {
+                        matches!(
+                            e.to_ascii_lowercase().as_str(),
+                            "png" | "jpg" | "jpeg" | "webp" | "bmp"
+                        )
+                    })
+                    .unwrap_or(false)
+            }) {
+                let s = img_path.display().to_string();
+                self.settings.bg_mode = BgMode::Wallpaper;
+                self.settings.bg_wallpaper = s.clone();
+                save_settings(&self.settings);
+                apply_theme(ui.ctx(), &self.settings);
+                self.request_wallpaper_load(s);
+            }
+        }
+        self.paint_app_background(ui.ctx());
         let logged_in = self.cookie.is_some();
         let p = pal(ui);
+        let chrome_fill = panel_chrome_fill(ui, &self.settings);
+        let central_fill = if self.settings.bg_mode == BgMode::ThemeDefault {
+            p.bg
+        } else {
+            egui::Color32::TRANSPARENT
+        };
         let mut acts: Vec<Action> = Vec::new();
         let mut do_search = false;
         let mut toggle_theme = false;
@@ -1732,7 +1921,7 @@ impl eframe::App for RustBlox {
                 .resizable(false)
                 .exact_size(74.0)
                 .show_separator_line(false)
-                .frame(egui::Frame::new().fill(p.bg).inner_margin(4))
+                .frame(egui::Frame::new().fill(chrome_fill).inner_margin(4))
                 .show(ui, |ui| {
                     ui.add_space(10.0);
                     let page = &self.page;
@@ -1760,7 +1949,7 @@ impl eframe::App for RustBlox {
             .show_separator_line(false)
             .frame(
                 egui::Frame::new()
-                    .fill(p.bg)
+                    .fill(chrome_fill)
                     .inner_margin(egui::Margin::symmetric(16, 10)),
             )
             .show(ui, |ui| {
@@ -1916,7 +2105,7 @@ impl eframe::App for RustBlox {
                 .show_separator_line(false)
                 .frame(
                     egui::Frame::new()
-                        .fill(p.bg)
+                        .fill(chrome_fill)
                         .inner_margin(egui::Margin::symmetric(20, 5)),
                 )
                 .show(ui, |ui| {
@@ -1928,7 +2117,7 @@ impl eframe::App for RustBlox {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(p.bg)
+                    .fill(central_fill)
                     .inner_margin(egui::Margin::symmetric(22, 6)),
             )
             .show(ui, |ui| {
@@ -1957,7 +2146,7 @@ impl eframe::App for RustBlox {
         if toggle_theme {
             self.settings.dark = !self.settings.dark;
             save_settings(&self.settings);
-            apply_theme(ui.ctx(), self.settings.dark);
+            apply_theme(ui.ctx(), &self.settings);
         }
 
         let hovered_game = acts.iter().find_map(|a| {

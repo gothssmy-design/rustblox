@@ -7,7 +7,7 @@ use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Security::Cryptography::{
     CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
 };
-use crate::types::Settings;
+use crate::types::{BgMode, Settings, TextColorMode};
 
 pub fn data_dir() -> PathBuf {
     let base = env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
@@ -57,16 +57,62 @@ pub fn load_settings() -> Settings {
     let Ok(v) = serde_json::from_str::<Value>(&text) else {
         return Settings::default();
     };
+    let def = Settings::default();
+    let bg_mode = match v["bg_mode"].as_str() {
+        Some("color") => BgMode::SolidColor,
+        Some("wallpaper") => BgMode::Wallpaper,
+        _ => BgMode::ThemeDefault,
+    };
+    let bg_color = match v["bg_color"].as_array() {
+        Some(arr) if arr.len() == 3 => [
+            arr[0].as_u64().unwrap_or(def.bg_color[0] as u64).min(255) as u8,
+            arr[1].as_u64().unwrap_or(def.bg_color[1] as u64).min(255) as u8,
+            arr[2].as_u64().unwrap_or(def.bg_color[2] as u64).min(255) as u8,
+        ],
+        _ => def.bg_color,
+    };
+    let bg_wallpaper = v["bg_wallpaper"].as_str().unwrap_or("").to_string();
+    let bg_overlay = v["bg_overlay"]
+        .as_f64()
+        .map(|f| (f as f32).clamp(0.0, 0.85))
+        .unwrap_or(def.bg_overlay);
+    let text_mode = match v["text_mode"].as_str() {
+        Some("white") => TextColorMode::White,
+        Some("green") => TextColorMode::Green,
+        Some("dark") => TextColorMode::Dark,
+        _ => TextColorMode::Auto,
+    };
     Settings {
         dark: v["dark"].as_bool().unwrap_or(false),
+        bg_mode,
+        bg_color,
+        bg_wallpaper,
+        bg_overlay,
+        text_mode,
         target_fps: v["target_fps"].as_u64().and_then(|n| u32::try_from(n).ok()),
         auto_close_roblox: v["auto_close_roblox"].as_bool().unwrap_or(true),
     }
 }
 
 pub fn save_settings(s: &Settings) {
+    let mode_str = match s.bg_mode {
+        BgMode::ThemeDefault => "default",
+        BgMode::SolidColor => "color",
+        BgMode::Wallpaper => "wallpaper",
+    };
+    let text_str = match s.text_mode {
+        TextColorMode::Auto => "auto",
+        TextColorMode::White => "white",
+        TextColorMode::Green => "green",
+        TextColorMode::Dark => "dark",
+    };
     let v = serde_json::json!({
         "dark": s.dark,
+        "bg_mode": mode_str,
+        "bg_color": [s.bg_color[0], s.bg_color[1], s.bg_color[2]],
+        "bg_wallpaper": s.bg_wallpaper,
+        "bg_overlay": s.bg_overlay,
+        "text_mode": text_str,
         "target_fps": s.target_fps,
         "auto_close_roblox": s.auto_close_roblox,
     });

@@ -6,9 +6,31 @@ use serde_json::Value;
 use crate::avatar_3d;
 use crate::video_preview;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BgMode {
+    #[default]
+    ThemeDefault,
+    SolidColor,
+    Wallpaper,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TextColorMode {
+    #[default]
+    Auto,
+    White,
+    Green,
+    Dark,
+}
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub dark: bool,
+    pub bg_mode: BgMode,
+    pub bg_color: [u8; 3],
+    pub bg_wallpaper: String,
+    pub bg_overlay: f32,
+    pub text_mode: TextColorMode,
     pub target_fps: Option<u32>,
     pub auto_close_roblox: bool,
 }
@@ -17,6 +39,11 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             dark: false,
+            bg_mode: BgMode::ThemeDefault,
+            bg_color: [22, 30, 46],
+            bg_wallpaper: String::new(),
+            bg_overlay: 0.42,
+            text_mode: TextColorMode::Auto,
             target_fps: None,
             auto_close_roblox: true,
         }
@@ -472,4 +499,6 @@ pub enum Msg {
     RobloxAppClosed,
     GameVideoIdResolved(u64, Option<u64>),
     VideoPreviewLoaded(u64, Result<Arc<video_preview::DecodedPreviewVideo>, String>),
+    WallpaperPicked(Option<String>),
+    WallpaperLoaded(String, Result<egui::ColorImage, String>),
 }

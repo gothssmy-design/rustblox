@@ -11,7 +11,7 @@ pub fn avatar_glass_frame(ui: &egui::Ui, pad: i8) -> egui::Frame {
             egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 24)),
         )
     } else {
-        (p.card_bg, egui::Stroke::new(1.0, p.border))
+        (ui.visuals().faint_bg_color, egui::Stroke::new(1.0, p.border))
     };
     egui::Frame::new()
         .fill(fill)
@@ -149,16 +149,21 @@ pub fn game_stats_row(
     text_size: f32,
     compact_stats: bool,
 ) {
+    let p = pal(ui);
+    let custom_bg = ui.visuals().panel_fill == Color32::TRANSPARENT;
     let dark = ui.visuals().dark_mode;
-    let stat_color = if dark {
-        Color32::from_rgb(226, 231, 240)
+    let (stat_color, sub_color) = if custom_bg {
+        (p.text, p.muted)
+    } else if dark {
+        (
+            Color32::from_rgb(226, 231, 240),
+            Color32::from_rgb(190, 198, 210),
+        )
     } else {
-        Color32::from_rgb(45, 50, 58)
-    };
-    let sub_color = if dark {
-        Color32::from_rgb(190, 198, 210)
-    } else {
-        Color32::from_rgb(80, 84, 92)
+        (
+            Color32::from_rgb(45, 50, 58),
+            Color32::from_rgb(80, 84, 92),
+        )
     };
 
     ui.horizontal(|ui| {

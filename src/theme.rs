@@ -1,6 +1,7 @@
 use std::fs;
 use std::sync::Arc;
 use eframe::egui::{self, Color32, CornerRadius, Sense};
+use crate::types::{BgMode, Settings, TextColorMode};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
@@ -55,7 +56,50 @@ impl Palette {
 }
 
 pub fn pal(ui: &egui::Ui) -> Palette {
-    Palette::of(ui.visuals().dark_mode)
+    let dark = ui.visuals().dark_mode;
+    let base = Palette::of(dark);
+    if ui.visuals().panel_fill == Color32::TRANSPARENT {
+        let text = ui.visuals().override_text_color.unwrap_or(base.text);
+        let muted = Color32::from_rgba_unmultiplied(
+            text.r(),
+            text.g(),
+            text.b(),
+            if dark { 216 } else { 194 },
+        );
+        if dark {
+            Palette {
+                bg: Color32::TRANSPARENT,
+                card_bg: Color32::from_rgba_unmultiplied(16, 19, 27, 214),
+                surface_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 28),
+                border: Color32::from_rgba_unmultiplied(255, 255, 255, 36),
+                text,
+                muted,
+                placeholder: Color32::from_rgba_unmultiplied(255, 255, 255, 22),
+                selected_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 42),
+                hover_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 22),
+                extreme_bg: Color32::from_rgba_unmultiplied(14, 17, 24, 210),
+                widget_inactive: Color32::from_rgba_unmultiplied(255, 255, 255, 28),
+                widget_hovered: Color32::from_rgba_unmultiplied(255, 255, 255, 46),
+            }
+        } else {
+            Palette {
+                bg: Color32::TRANSPARENT,
+                card_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 226),
+                surface_bg: Color32::from_rgba_unmultiplied(16, 19, 26, 20),
+                border: Color32::from_rgba_unmultiplied(16, 19, 26, 36),
+                text,
+                muted,
+                placeholder: Color32::from_rgba_unmultiplied(16, 19, 26, 22),
+                selected_bg: Color32::from_rgba_unmultiplied(16, 19, 26, 32),
+                hover_bg: Color32::from_rgba_unmultiplied(16, 19, 26, 16),
+                extreme_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 220),
+                widget_inactive: Color32::from_rgba_unmultiplied(16, 19, 26, 18),
+                widget_hovered: Color32::from_rgba_unmultiplied(16, 19, 26, 34),
+            }
+        }
+    } else {
+        base
+    }
 }
 
 pub const GREEN: Color32 = Color32::from_rgb(0, 176, 111);
@@ -191,18 +235,115 @@ pub fn brand_title(ui: &mut egui::Ui, size: f32, clickable: bool) -> egui::Respo
     }
 }
 
-pub fn apply_theme(ctx: &egui::Context, dark: bool) {
+fn relative_luminance(rgb: [u8; 3]) -> f32 {
+    let ch = |c: u8| {
+        let s = c as f32 / 255.0;
+        if s <= 0.03928 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * ch(rgb[0]) + 0.7152 * ch(rgb[1]) + 0.0722 * ch(rgb[2])
+}
+
+pub fn is_dark_color(rgb: [u8; 3]) -> bool {
+    let lum = relative_luminance(rgb);
+    // Warm/rose hues stay cleaner with crisp white text up to slightly higher luminance
+    if rgb[0] > rgb[1].saturating_add(35) {
+        lum < 0.28
+    } else {
+        lum < 0.20
+    }
+}
+
+pub fn effective_dark_mode(settings: &Settings) -> bool {
+    match settings.bg_mode {
+        BgMode::SolidColor => match settings.text_mode {
+            TextColorMode::Auto => is_dark_color(settings.bg_color),
+            TextColorMode::White | TextColorMode::Green => true,
+            TextColorMode::Dark => false,
+        },
+        BgMode::ThemeDefault | BgMode::Wallpaper => settings.dark,
+    }
+}
+
+pub fn effective_text_color(settings: &Settings) -> Color32 {
+    let dark = effective_dark_mode(settings);
+    let custom_bg = settings.bg_mode != BgMode::ThemeDefault;
+    match settings.text_mode {
+        TextColorMode::Auto => {
+            if custom_bg {
+                if dark {
+                    Color32::from_rgb(252, 253, 255)
+                } else {
+                    Color32::from_rgb(16, 19, 26)
+                }
+            } else {
+                Palette::of(dark).text
+            }
+        }
+        TextColorMode::White => Color32::from_rgb(255, 255, 255),
+        TextColorMode::Green => {
+            if dark {
+                Color32::from_rgb(126, 248, 172)
+            } else {
+                Color32::from_rgb(12, 118, 68)
+            }
+        }
+        TextColorMode::Dark => Color32::from_rgb(16, 19, 26),
+    }
+}
+
+pub fn panel_chrome_fill(ui: &egui::Ui, settings: &Settings) -> Color32 {
+    if settings.bg_mode == BgMode::ThemeDefault {
+        pal(ui).bg
+    } else if effective_dark_mode(settings) {
+        Color32::from_rgba_unmultiplied(15, 18, 24, 194)
+    } else {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 206)
+    }
+}
+
+pub fn apply_theme(ctx: &egui::Context, settings: &Settings) {
+    let dark = effective_dark_mode(settings);
+    let custom_bg = settings.bg_mode != BgMode::ThemeDefault;
     let p = Palette::of(dark);
+    let text_color = effective_text_color(settings);
     let mut v = if dark {
         egui::Visuals::dark()
     } else {
         egui::Visuals::light()
     };
-    v.panel_fill = p.bg;
-    v.window_fill = p.bg;
-    v.extreme_bg_color = p.extreme_bg;
-    v.faint_bg_color = p.card_bg;
-    v.override_text_color = Some(p.text);
+    v.panel_fill = if custom_bg { Color32::TRANSPARENT } else { p.bg };
+    v.window_fill = if custom_bg {
+        if dark {
+            Color32::from_rgba_unmultiplied(20, 24, 32, 244)
+        } else {
+            Color32::from_rgba_unmultiplied(252, 253, 255, 246)
+        }
+    } else {
+        p.bg
+    };
+    v.extreme_bg_color = if custom_bg {
+        if dark {
+            Color32::from_rgba_unmultiplied(14, 17, 24, 210)
+        } else {
+            Color32::from_rgba_unmultiplied(255, 255, 255, 220)
+        }
+    } else {
+        p.extreme_bg
+    };
+    v.faint_bg_color = if custom_bg {
+        if dark {
+            Color32::from_rgba_unmultiplied(16, 19, 27, 214)
+        } else {
+            Color32::from_rgba_unmultiplied(255, 255, 255, 226)
+        }
+    } else {
+        p.card_bg
+    };
+    v.override_text_color = Some(text_color);
     v.text_options.font_hinting = true;
     v.text_options.subpixel_binning = false;
     v.window_corner_radius = CornerRadius::same(12);
@@ -211,18 +352,38 @@ pub fn apply_theme(ctx: &egui::Context, dark: bool) {
     let r8 = CornerRadius::same(8);
     v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, p.border);
     v.widgets.noninteractive.corner_radius = r8;
-    v.widgets.inactive.weak_bg_fill = p.widget_inactive;
-    v.widgets.inactive.bg_fill = p.widget_inactive;
+    v.widgets.noninteractive.fg_stroke.color = text_color;
+    v.widgets.inactive.weak_bg_fill = if custom_bg {
+        if dark {
+            Color32::from_rgba_unmultiplied(255, 255, 255, 28)
+        } else {
+            Color32::from_rgba_unmultiplied(16, 19, 26, 20)
+        }
+    } else {
+        p.widget_inactive
+    };
+    v.widgets.inactive.bg_fill = v.widgets.inactive.weak_bg_fill;
     v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
     v.widgets.inactive.corner_radius = r8;
-    v.widgets.hovered.weak_bg_fill = p.widget_hovered;
-    v.widgets.hovered.bg_fill = p.widget_hovered;
+    v.widgets.inactive.fg_stroke.color = text_color;
+    v.widgets.hovered.weak_bg_fill = if custom_bg {
+        if dark {
+            Color32::from_rgba_unmultiplied(255, 255, 255, 46)
+        } else {
+            Color32::from_rgba_unmultiplied(16, 19, 26, 36)
+        }
+    } else {
+        p.widget_hovered
+    };
+    v.widgets.hovered.bg_fill = v.widgets.hovered.weak_bg_fill;
     v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, p.border);
     v.widgets.hovered.corner_radius = r8;
+    v.widgets.hovered.fg_stroke.color = text_color;
     v.widgets.active.weak_bg_fill = p.selected_bg;
     v.widgets.active.bg_fill = p.selected_bg;
     v.widgets.active.bg_stroke = egui::Stroke::new(1.0, p.border);
     v.widgets.active.corner_radius = r8;
+    v.widgets.active.fg_stroke.color = text_color;
     v.widgets.open.corner_radius = r8;
     v.selection.bg_fill = Color32::from_rgba_unmultiplied(0, 176, 111, 55);
     v.selection.stroke = egui::Stroke::new(1.0, GREEN);
@@ -243,9 +404,33 @@ pub fn apply_theme(ctx: &egui::Context, dark: bool) {
 
 pub fn card_frame(ui: &egui::Ui, margin: i8) -> egui::Frame {
     let p = pal(ui);
+    let custom_bg = ui.visuals().panel_fill == Color32::TRANSPARENT;
+    let fill = ui.visuals().faint_bg_color;
+    let stroke_color = if custom_bg && ui.visuals().dark_mode {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 28)
+    } else {
+        p.border
+    };
     egui::Frame::new()
-        .fill(p.card_bg)
-        .stroke(egui::Stroke::new(1.0, p.border))
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, stroke_color))
         .corner_radius(12)
         .inner_margin(margin)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_dark_color;
+
+    #[test]
+    fn detects_rose_and_light_dark_contrast_correctly() {
+        // Deep rose & vibrant rose should trigger light/white text
+        assert!(is_dark_color([184, 50, 95]));
+        assert!(is_dark_color([222, 74, 122]));
+        // Soft pastel rose & warm sand should trigger dark text
+        assert!(!is_dark_color([248, 212, 226]));
+        assert!(!is_dark_color([245, 239, 230]));
+        // Deep navy should trigger light text
+        assert!(is_dark_color([16, 30, 48]));
+    }
 }
