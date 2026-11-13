@@ -1,0 +1,5 @@
+target/
+assets/
+Cargo.lock
+*.exe
+*.pdb

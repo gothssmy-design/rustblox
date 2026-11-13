@@ -1,0 +1,1 @@
+Do not read the same file more than once per task unless it has been modified. If a file is too large or the fix is unclear after one read, stop and ask me which function to look at instead of re-reading

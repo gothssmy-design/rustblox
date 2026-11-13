@@ -1,0 +1,11 @@
+pub mod widgets;
+pub mod menu;
+pub mod page_home;
+pub mod page_charts;
+pub mod page_search;
+pub mod page_game;
+pub mod page_add_friend;
+pub mod page_profile;
+pub mod page_avatar;
+pub mod page_login;
+pub mod page_settings;
