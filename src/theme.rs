@@ -417,21 +417,21 @@ pub fn is_dark_color(rgb: [u8; 3]) -> bool {
 }
 
 pub fn effective_dark_mode(settings: &Settings) -> bool {
-    match settings.bg_mode {
-        BgMode::SolidColor => match settings.text_mode {
-            TextColorMode::Auto => is_dark_color(settings.bg_color),
-            TextColorMode::White | TextColorMode::Green => true,
-            TextColorMode::Dark => false,
-        },
-        BgMode::ThemeDefault | BgMode::Wallpaper => settings.dark,
-    }
+    settings.dark
 }
 
 pub fn effective_text_color(settings: &Settings) -> Color32 {
     let dark = effective_dark_mode(settings);
     let custom_bg = settings.bg_mode != BgMode::ThemeDefault;
     match settings.text_mode {
-        TextColorMode::Auto => {
+        TextColorMode::Green => {
+            if dark {
+                Color32::from_rgb(126, 248, 172)
+            } else {
+                Color32::from_rgb(12, 118, 68)
+            }
+        }
+        TextColorMode::Auto | TextColorMode::White | TextColorMode::Dark => {
             if custom_bg {
                 if dark {
                     Color32::from_rgb(252, 253, 255)
@@ -442,15 +442,6 @@ pub fn effective_text_color(settings: &Settings) -> Color32 {
                 Palette::of(dark).text
             }
         }
-        TextColorMode::White => Color32::from_rgb(255, 255, 255),
-        TextColorMode::Green => {
-            if dark {
-                Color32::from_rgb(126, 248, 172)
-            } else {
-                Color32::from_rgb(12, 118, 68)
-            }
-        }
-        TextColorMode::Dark => Color32::from_rgb(16, 19, 26),
     }
 }
 
