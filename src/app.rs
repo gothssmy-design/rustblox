@@ -1914,6 +1914,7 @@ impl eframe::App for RustBlox {
         let mut acts: Vec<Action> = Vec::new();
         let mut do_search = false;
         let mut toggle_theme = false;
+        let mut refresh_auth = false;
 
         // Left sidebar (only shown when logged in)
         if logged_in {
@@ -1971,8 +1972,8 @@ impl eframe::App for RustBlox {
 
                     if logged_in {
                         ui.add_space(20.0);
-                        let search_w = (ui.available_width() - 220.0).clamp(180.0, 440.0);
-                        let search_pad = ((ui.available_width() - 200.0 - search_w) * 0.5).max(8.0);
+                        let search_w = (ui.available_width() - 330.0).clamp(180.0, 440.0);
+                        let search_pad = ((ui.available_width() - 310.0 - search_w) * 0.5).max(8.0);
                         ui.add_space(search_pad);
 
                         egui::Frame::new()
@@ -2005,7 +2006,7 @@ impl eframe::App for RustBlox {
                                         && ui
                                             .add(
                                                 egui::Label::new(
-                                                    RichText::new("âœ•").size(12.0).color(p.muted),
+                                                    RichText::new("\u{00D7}").size(12.0).color(p.muted),
                                                 )
                                                 .sense(Sense::click()),
                                             )
@@ -2082,6 +2083,80 @@ impl eframe::App for RustBlox {
                                 };
                                 resp.1.context_menu(&mut menu);
                                 resp.2.context_menu(&mut menu);
+
+                                ui.add_space(6.0);
+                                let rb_text = match prof.robux {
+                                    Some(v) => crate::api::format_commas(v),
+                                    None => "--".to_string(),
+                                };
+                                let rb_gold = if self.settings.dark {
+                                    egui::Color32::from_rgb(245, 194, 66)
+                                } else {
+                                    egui::Color32::from_rgb(184, 126, 8)
+                                };
+                                let rb_frame = egui::Frame::new()
+                                    .fill(p.surface_bg)
+                                    .stroke(egui::Stroke::new(1.0, p.border))
+                                    .corner_radius(15)
+                                    .inner_margin(egui::Margin::symmetric(10, 4))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 6.0;
+                                            let (icon_rect, _) = ui.allocate_exact_size(
+                                                egui::vec2(15.0, 15.0),
+                                                Sense::hover(),
+                                            );
+                                            draw_robux_icon(
+                                                ui.painter(),
+                                                icon_rect.center(),
+                                                15.0,
+                                                rb_gold,
+                                            );
+                                            ui.label(
+                                                RichText::new(&rb_text)
+                                                    .size(12.5)
+                                                    .strong()
+                                                    .color(p.text),
+                                            );
+                                        });
+                                    });
+                                let rb_tip = prof
+                                    .robux
+                                    .map(|v| {
+                                        format!(
+                                            "{} Robux available — click to open Transactions",
+                                            crate::api::format_commas(v)
+                                        )
+                                    })
+                                    .unwrap_or_else(|| {
+                                        "Robux balance unavailable — right-click to refresh"
+                                            .to_string()
+                                    });
+                                let rb_resp = ui
+                                    .interact(
+                                        rb_frame.response.rect,
+                                        ui.scope_id().with("topbar_robux_pill"),
+                                        Sense::click(),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .on_hover_text(rb_tip);
+                                if rb_resp.clicked() {
+                                    acts.push(Action::OpenUrl(
+                                        "https://www.roblox.com/transactions".to_string(),
+                                    ));
+                                }
+                                rb_resp.context_menu(|ui| {
+                                    if ui.button("Open Transactions").clicked() {
+                                        acts.push(Action::OpenUrl(
+                                            "https://www.roblox.com/transactions".to_string(),
+                                        ));
+                                        ui.close();
+                                    }
+                                    if ui.button("Refresh Balance").clicked() {
+                                        refresh_auth = true;
+                                        ui.close();
+                                    }
+                                });
                             }
                         } else {
                             let theme_icon = if self.settings.dark { "Light" } else { "Dark" };
@@ -2147,6 +2222,9 @@ impl eframe::App for RustBlox {
             self.settings.dark = !self.settings.dark;
             save_settings(&self.settings);
             apply_theme(ui.ctx(), &self.settings);
+        }
+        if refresh_auth {
+            self.sync_auth_session(true);
         }
 
         let hovered_game = acts.iter().find_map(|a| {

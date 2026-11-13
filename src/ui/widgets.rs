@@ -526,3 +526,26 @@ pub fn bubble(
     resp.unwrap()
 }
 
+pub fn draw_robux_icon(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    size: f32,
+    color: Color32,
+) {
+    let r = size * 0.43;
+    let mut pts = Vec::with_capacity(6);
+    for i in 0..6 {
+        let angle = -std::f32::consts::FRAC_PI_2 + (i as f32) * std::f32::consts::FRAC_PI_3;
+        pts.push(egui::pos2(
+            center.x + r * angle.cos(),
+            center.y + r * angle.sin(),
+        ));
+    }
+    let stroke_w = (size * 0.13).clamp(1.3, 2.4);
+    painter.add(egui::Shape::closed_line(pts, egui::Stroke::new(stroke_w, color)));
+    let inner_half = (size * 0.145).max(1.8);
+    let inner = egui::Rect::from_center_size(center, egui::vec2(inner_half * 2.0, inner_half * 2.0));
+    painter.rect_filled(inner, (size * 0.04).max(0.5), color);
+}
+
+

@@ -305,6 +305,66 @@ pub fn panel_chrome_fill(ui: &egui::Ui, settings: &Settings) -> Color32 {
     }
 }
 
+fn rgb_to_hsv(rgb: [u8; 3]) -> (f32, f32, f32) {
+    let r = rgb[0] as f32 / 255.0;
+    let g = rgb[1] as f32 / 255.0;
+    let b = rgb[2] as f32 / 255.0;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    let h = if d < 1e-5 {
+        0.0
+    } else if (max - r).abs() < 1e-5 {
+        60.0 * (((g - b) / d).rem_euclid(6.0))
+    } else if (max - g).abs() < 1e-5 {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    let s = if max < 1e-5 { 0.0 } else { d / max };
+    (h, s, max)
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color32 {
+    let c = v * s;
+    let x = c * (1.0 - (((h / 60.0) % 2.0) - 1.0).abs());
+    let m = v - c;
+    let (r1, g1, b1) = match (h / 60.0).floor() as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    Color32::from_rgb(
+        ((r1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+        ((g1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+        ((b1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+    )
+}
+
+pub fn theme_accent(settings: &Settings) -> Color32 {
+    let dark = effective_dark_mode(settings);
+    if settings.bg_mode == BgMode::SolidColor {
+        let (h, s, _) = rgb_to_hsv(settings.bg_color);
+        if s >= 0.14 {
+            return hsv_to_rgb(h, s.clamp(0.68, 0.90), if dark { 0.88 } else { 0.68 });
+        }
+    }
+    if settings.text_mode == TextColorMode::Green {
+        GREEN
+    } else if dark {
+        GREEN
+    } else {
+        BLUE
+    }
+}
+
+pub fn accent_color(ui: &egui::Ui) -> Color32 {
+    ui.visuals().selection.stroke.color
+}
+
 pub fn apply_theme(ctx: &egui::Context, settings: &Settings) {
     let dark = effective_dark_mode(settings);
     let custom_bg = settings.bg_mode != BgMode::ThemeDefault;
@@ -385,8 +445,9 @@ pub fn apply_theme(ctx: &egui::Context, settings: &Settings) {
     v.widgets.active.corner_radius = r8;
     v.widgets.active.fg_stroke.color = text_color;
     v.widgets.open.corner_radius = r8;
-    v.selection.bg_fill = Color32::from_rgba_unmultiplied(0, 176, 111, 55);
-    v.selection.stroke = egui::Stroke::new(1.0, GREEN);
+    let accent = theme_accent(settings);
+    v.selection.bg_fill = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 55);
+    v.selection.stroke = egui::Stroke::new(1.0, accent);
 
     let theme = if dark {
         egui::Theme::Dark
@@ -420,7 +481,8 @@ pub fn card_frame(ui: &egui::Ui, margin: i8) -> egui::Frame {
 
 #[cfg(test)]
 mod tests {
-    use super::is_dark_color;
+    use super::{is_dark_color, theme_accent, GREEN, BLUE};
+    use crate::types::{BgMode, Settings};
 
     #[test]
     fn detects_rose_and_light_dark_contrast_correctly() {
@@ -432,5 +494,21 @@ mod tests {
         assert!(!is_dark_color([245, 239, 230]));
         // Deep navy should trigger light text
         assert!(is_dark_color([16, 30, 48]));
+    }
+
+    #[test]
+    fn theme_accent_tracks_theme_mode_and_color() {
+        let mut s = Settings::default();
+        s.dark = true;
+        s.bg_mode = BgMode::ThemeDefault;
+        assert_eq!(theme_accent(&s), GREEN);
+
+        s.dark = false;
+        assert_eq!(theme_accent(&s), BLUE);
+
+        s.bg_mode = BgMode::SolidColor;
+        s.bg_color = [184, 50, 95]; // rose theme -> red-dominant accent
+        let rose_accent = theme_accent(&s);
+        assert!(rose_accent.r() > rose_accent.g() && rose_accent.r() > rose_accent.b());
     }
 }

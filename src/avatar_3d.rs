@@ -93,12 +93,15 @@ pub struct Avatar3DState {
     pub loaded_user_id: Option<u64>,
 }
 
+const DEFAULT_YAW: f32 = 0.0;
+const DEFAULT_PITCH: f32 = 0.05;
+
 impl Default for Avatar3DState {
     fn default() -> Self {
         Self {
             is_3d: true,
-            yaw: std::f32::consts::PI, // Character faces forward directly at camera
-            pitch: -0.06,
+            yaw: DEFAULT_YAW, // Character faces forward directly at camera
+            pitch: DEFAULT_PITCH,
             zoom: 1.0,
             model: None,
             textures: Vec::new(),
@@ -286,10 +289,10 @@ pub fn parse_avatar_3d(
                     if idx > 0 && idx <= normals.len() {
                         normals[idx - 1]
                     } else {
-                        [0.0, 0.0, 1.0]
+                        [0.0, 0.0, 0.0]
                     }
                 } else {
-                    [0.0, 0.0, 1.0]
+                    [0.0, 0.0, 0.0]
                 };
 
                 AvatarVertex {
@@ -312,19 +315,20 @@ pub fn parse_avatar_3d(
             };
 
             for i in 1..face_tokens.len() - 1 {
-                let v1 = parse_vertex(face_tokens[i]);
-                let v2 = parse_vertex(face_tokens[i + 1]);
+                let mut v0_tri = v0.clone();
+                let mut v1 = parse_vertex(face_tokens[i]);
+                let mut v2 = parse_vertex(face_tokens[i + 1]);
 
                 // Calculate face normal
                 let edge1 = [
-                    v1.pos[0] - v0.pos[0],
-                    v1.pos[1] - v0.pos[1],
-                    v1.pos[2] - v0.pos[2],
+                    v1.pos[0] - v0_tri.pos[0],
+                    v1.pos[1] - v0_tri.pos[1],
+                    v1.pos[2] - v0_tri.pos[2],
                 ];
                 let edge2 = [
-                    v2.pos[0] - v0.pos[0],
-                    v2.pos[1] - v0.pos[1],
-                    v2.pos[2] - v0.pos[2],
+                    v2.pos[0] - v0_tri.pos[0],
+                    v2.pos[1] - v0_tri.pos[1],
+                    v2.pos[2] - v0_tri.pos[2],
                 ];
                 let mut fnorm = [
                     edge1[1] * edge2[2] - edge1[2] * edge2[1],
@@ -338,8 +342,17 @@ pub fn parse_avatar_3d(
                     fnorm[2] /= len;
                 }
 
+                for vert in [&mut v0_tri, &mut v1, &mut v2] {
+                    let nlen2 = vert.normal[0] * vert.normal[0]
+                        + vert.normal[1] * vert.normal[1]
+                        + vert.normal[2] * vert.normal[2];
+                    if nlen2 <= 1e-6 {
+                        vert.normal = fnorm;
+                    }
+                }
+
                 triangles.push(AvatarTriangle {
-                    v: [v0.clone(), v1, v2],
+                    v: [v0_tri, v1, v2],
                     texture_index: tex_idx,
                     base_color: base_col,
                     normal: fnorm,
@@ -455,6 +468,110 @@ struct TransformedTriangle<'a> {
     _tri: &'a AvatarTriangle,
 }
 
+fn normalize3(v: [f32; 3]) -> [f32; 3] {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if len > 1e-6 {
+        [v[0] / len, v[1] / len, v[2] / len]
+    } else {
+        [0.0, 0.0, -1.0]
+    }
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn rotate_normal(n: [f32; 3], cos_y: f32, sin_y: f32, cos_p: f32, sin_p: f32) -> [f32; 3] {
+    let nx = n[0] * cos_y + n[2] * sin_y;
+    let ny_pre = n[1];
+    let nz_pre = -n[0] * sin_y + n[2] * cos_y;
+    let rny = ny_pre * cos_p - nz_pre * sin_p;
+    let rnz = ny_pre * sin_p + nz_pre * cos_p;
+    normalize3([nx, rny, rnz])
+}
+
+/// Three-point studio lighting (warm key + cool fill + Fresnel rim + hemisphere AO).
+fn shade_studio_vertex(
+    view_pos: [f32; 3],
+    raw_normal: [f32; 3],
+    face_normal: [f32; 3],
+    cos_y: f32,
+    sin_y: f32,
+    cos_p: f32,
+    sin_p: f32,
+    untextured_base: Option<Color32>,
+) -> Color32 {
+    let n_src = if dot3(raw_normal, raw_normal) > 1e-6 {
+        raw_normal
+    } else {
+        face_normal
+    };
+    let n = rotate_normal(n_src, cos_y, sin_y, cos_p, sin_p);
+    let v = normalize3([-view_pos[0], -view_pos[1], -(4.8 + view_pos[2])]);
+
+    // Vectors point from surface toward studio lights (camera sits on -Z).
+    let l_key = normalize3([-0.46, 0.68, -0.72]);
+    let l_fill = normalize3([0.78, 0.14, -0.50]);
+    let l_rim = normalize3([0.44, 0.56, 0.70]);
+
+    // Key light: soft-wrapped diffuse + Blinn-Phong studio softbox specular
+    let diff_key = ((dot3(n, l_key) + 0.24) / 1.24).clamp(0.0, 1.0).powf(1.12);
+    let h_key = normalize3([l_key[0] + v[0], l_key[1] + v[1], l_key[2] + v[2]]);
+    let spec = dot3(n, h_key).max(0.0).powf(16.0) * 0.26;
+
+    // Cool opposite fill light
+    let diff_fill = ((dot3(n, l_fill) + 0.34) / 1.34).clamp(0.0, 1.0);
+
+    // Fresnel rim highlight along silhouette edges
+    let ndotv = dot3(n, v).clamp(0.0, 1.0);
+    let fresnel = (1.0 - ndotv).powf(2.4);
+    let rim_gate = ((dot3(n, l_rim) + 0.40) / 1.40).clamp(0.0, 1.0);
+    let rim = fresnel * (0.16 + 0.34 * rim_gate);
+
+    // Hemisphere ambient (studio ceiling vs floor bounce) + subtle vertical grounding AO
+    let hemi = (n[1] * 0.5 + 0.5).clamp(0.0, 1.0);
+    let amb_rgb = [
+        0.24 + (0.37 - 0.24) * hemi,
+        0.25 + (0.39 - 0.25) * hemi,
+        0.30 + (0.44 - 0.30) * hemi,
+    ];
+    let ao = 0.86 + 0.14 * ((view_pos[1] + 1.0) * 0.5).clamp(0.0, 1.0);
+
+    let key_tint = [1.04f32, 0.99f32, 0.92f32];
+    let fill_tint = [0.82f32, 0.91f32, 1.08f32];
+    let rim_tint = [0.92f32, 0.96f32, 1.06f32];
+
+    let mut lr = amb_rgb[0] * ao + (0.62 * diff_key * key_tint[0]) + (0.24 * diff_fill * fill_tint[0]);
+    let mut lg = amb_rgb[1] * ao + (0.62 * diff_key * key_tint[1]) + (0.24 * diff_fill * fill_tint[1]);
+    let mut lb = amb_rgb[2] * ao + (0.62 * diff_key * key_tint[2]) + (0.24 * diff_fill * fill_tint[2]);
+
+    let sr = spec * key_tint[0] + rim * rim_tint[0];
+    let sg = spec * key_tint[1] + rim * rim_tint[1];
+    let sb = spec * key_tint[2] + rim * rim_tint[2];
+
+    if let Some(base) = untextured_base {
+        let br = base.r() as f32 / 255.0;
+        let bg = base.g() as f32 / 255.0;
+        let bb = base.b() as f32 / 255.0;
+        Color32::from_rgba_unmultiplied(
+            ((br * lr + sr * 0.72).clamp(0.0, 1.0) * 255.0) as u8,
+            ((bg * lg + sg * 0.72).clamp(0.0, 1.0) * 255.0) as u8,
+            ((bb * lb + sb * 0.72).clamp(0.0, 1.0) * 255.0) as u8,
+            base.a(),
+        )
+    } else {
+        lr = (lr + sr).clamp(0.0, 1.0);
+        lg = (lg + sg).clamp(0.0, 1.0);
+        lb = (lb + sb).clamp(0.0, 1.0);
+        Color32::from_rgba_unmultiplied(
+            (lr * 255.0) as u8,
+            (lg * 255.0) as u8,
+            (lb * 255.0) as u8,
+            255,
+        )
+    }
+}
+
 /// Render the 3D model into an egui Painter with GPU acceleration
 pub fn render_avatar_3d_mesh(
     painter: &Painter,
@@ -472,15 +589,6 @@ pub fn render_avatar_3d_mesh(
     let sin_y = yaw.sin();
     let cos_p = pitch.cos();
     let sin_p = pitch.sin();
-
-    // Directional lighting from upper-front
-    let light_dir = [-0.35f32, 0.72f32, 0.60f32];
-    let light_len =
-        (light_dir[0] * light_dir[0] + light_dir[1] * light_dir[1] + light_dir[2] * light_dir[2])
-            .sqrt();
-    let lx = light_dir[0] / light_len;
-    let ly = light_dir[1] / light_len;
-    let lz = light_dir[2] / light_len;
 
     // Transform vertex
     let transform_pt = |p: [f32; 3]| -> ([f32; 3], Pos2, f32) {
@@ -512,9 +620,9 @@ pub fn render_avatar_3d_mesh(
     let mut projected: Vec<TransformedTriangle> = Vec::with_capacity(model.triangles.len());
 
     for tri in &model.triangles {
-        let (_t0, s0, z0) = transform_pt(tri.v[0].pos);
-        let (_t1, s1, z1) = transform_pt(tri.v[1].pos);
-        let (_t2, s2, z2) = transform_pt(tri.v[2].pos);
+        let (t0, s0, z0) = transform_pt(tri.v[0].pos);
+        let (t1, s1, z1) = transform_pt(tri.v[1].pos);
+        let (t2, s2, z2) = transform_pt(tri.v[2].pos);
 
         // 2D Cross product backface culling
         let cross_2d = (s1.x - s0.x) * (s2.y - s0.y) - (s1.y - s0.y) * (s2.x - s0.x);
@@ -522,47 +630,26 @@ pub fn render_avatar_3d_mesh(
             continue; // Backface culled
         }
 
-        // Lighting calculation based on rotated triangle normal
-        let nx = tri.normal[0] * cos_y + tri.normal[2] * sin_y;
-        let ny_pre = tri.normal[1];
-        let nz_pre = -tri.normal[0] * sin_y + tri.normal[2] * cos_y;
-
-        let rny = ny_pre * cos_p - nz_pre * sin_p;
-        let rnz = ny_pre * sin_p + nz_pre * cos_p;
-
-        let dot = (nx * lx + rny * ly + rnz * lz).max(0.0);
-        let ambient = 0.52f32;
-        let diffuse = 0.48f32 * dot;
-        let intensity = (ambient + diffuse).clamp(0.0, 1.0);
-
-        let shade_color = |col: Color32| -> Color32 {
-            Color32::from_rgba_unmultiplied(
-                ((col.r() as f32 * intensity).min(255.0)) as u8,
-                ((col.g() as f32 * intensity).min(255.0)) as u8,
-                ((col.b() as f32 * intensity).min(255.0)) as u8,
-                col.a(),
-            )
-        };
-
-        let base_col = tri.base_color;
         let has_tex = tri
             .texture_index
             .and_then(|idx| textures.get(idx))
             .and_then(|t| t.handle.as_ref())
             .is_some();
 
-        let vert_col = if has_tex {
-            // When texture is applied, vertex color acts as light multiplier
-            let l_byte = (intensity * 255.0).clamp(0.0, 255.0) as u8;
-            Color32::from_rgba_unmultiplied(l_byte, l_byte, l_byte, 255)
-        } else {
-            let base = if tri.v[0].color != Color32::WHITE {
-                tri.v[0].color
+        let vert_col_for = |vert: &AvatarVertex, vp: [f32; 3]| -> Color32 {
+            let base = if has_tex {
+                None
+            } else if vert.color != Color32::WHITE {
+                Some(vert.color)
             } else {
-                base_col
+                Some(tri.base_color)
             };
-            shade_color(base)
+            shade_studio_vertex(vp, vert.normal, tri.normal, cos_y, sin_y, cos_p, sin_p, base)
         };
+
+        let col0 = vert_col_for(&tri.v[0], t0);
+        let col1 = vert_col_for(&tri.v[1], t1);
+        let col2 = vert_col_for(&tri.v[2], t2);
 
         // OBJ UV v is flipped relative to egui UV space
         let uv0 = Pos2::new(tri.v[0].uv[0], 1.0 - tri.v[0].uv[1]);
@@ -578,9 +665,9 @@ pub fn render_avatar_3d_mesh(
             uv0,
             uv1,
             uv2,
-            col0: vert_col,
-            col1: vert_col,
-            col2: vert_col,
+            col0,
+            col1,
+            col2,
             avg_z,
             tex_idx: tri.texture_index,
             _tri: tri,
@@ -767,7 +854,7 @@ pub fn render_avatar_viewport(
     // 4. Mouse Grab & Drag interaction
     if resp.dragged() {
         let delta = resp.drag_delta();
-        state.yaw += delta.x * 0.015;
+        state.yaw -= delta.x * 0.015;
         state.pitch = (state.pitch + delta.y * 0.015).clamp(-0.75, 0.75);
         // Automatically switch to 3D mode if dragged while in 2D and 3D model is loaded
         if !state.is_3d && has_3d_model {
@@ -790,8 +877,8 @@ pub fn render_avatar_viewport(
     }
 
     if resp.double_clicked() {
-        state.yaw = std::f32::consts::PI;
-        state.pitch = -0.06;
+        state.yaw = DEFAULT_YAW;
+        state.pitch = DEFAULT_PITCH;
         state.zoom = 1.0;
     }
 
@@ -898,8 +985,8 @@ pub fn render_avatar_viewport(
         .min_size(Vec2::new(28.0, 28.0));
 
         if ui.add(reset_btn).on_hover_text("Reset Camera (Yaw & Pitch)").clicked() {
-            state.yaw = std::f32::consts::PI;
-            state.pitch = -0.06;
+            state.yaw = DEFAULT_YAW;
+            state.pitch = DEFAULT_PITCH;
             state.zoom = 1.0;
         }
     });
@@ -925,5 +1012,52 @@ pub fn render_avatar_viewport(
                     ui.label(egui::RichText::new("3D").size(11.0).strong());
                 });
             });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{shade_studio_vertex, Avatar3DState, DEFAULT_PITCH, DEFAULT_YAW};
+    use eframe::egui::Color32;
+
+    #[test]
+    fn default_camera_faces_front_and_studio_lighting_has_contrast() {
+        let st = Avatar3DState::default();
+        assert_eq!(st.yaw, DEFAULT_YAW);
+        assert_eq!(st.pitch, DEFAULT_PITCH);
+
+        let key_lit = shade_studio_vertex(
+            [0.0, 0.2, -0.3],
+            [-0.3, 0.5, -0.8],
+            [-0.3, 0.5, -0.8],
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            None,
+        );
+        let shadow_side = shade_studio_vertex(
+            [0.3, -0.2, 0.1],
+            [0.85, -0.45, 0.25],
+            [0.85, -0.45, 0.25],
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            None,
+        );
+        assert!(key_lit.r() > shadow_side.r() + 45);
+
+        let dark_lit = shade_studio_vertex(
+            [-0.2, 0.4, -0.4],
+            [-0.22, 0.34, -0.91],
+            [-0.22, 0.34, -0.91],
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            Some(Color32::from_rgb(20, 20, 22)),
+        );
+        assert!(dark_lit.r() > 50);
     }
 }

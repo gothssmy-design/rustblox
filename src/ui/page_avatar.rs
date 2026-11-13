@@ -2,7 +2,7 @@
 use eframe::egui::{self, Color32, CornerRadius, Sense, RichText};
 use crate::app::RustBlox;
 use crate::avatar_3d::render_avatar_viewport;
-use crate::theme::{pal, GREEN, RED};
+use crate::theme::{accent_color, pal, GREEN, RED};
 use crate::types::{Action, AvatarAsset, AvatarTab, BodyColorTarget, OutfitItem};
 use crate::ui::widgets::*;
 
@@ -26,28 +26,21 @@ fn avatar_assets_grid(
     } else {
         pal_colors.surface_bg
     };
+    let accent = accent_color(ui);
     for row in items.chunks(cols) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
             for item in row {
                 let is_worn = worn_ids.contains(&item.id);
-                let card_fill = if is_worn {
-                    if ui.visuals().dark_mode {
-                        Color32::from_rgba_unmultiplied(22, 44, 34, 240)
-                    } else {
-                        Color32::from_rgb(232, 249, 238)
-                    }
+                let card_stroke = if is_worn {
+                    egui::Stroke::new(2.0, accent)
                 } else {
-                    item_fill
+                    egui::Stroke::NONE
                 };
-                let card_stroke = egui::Stroke::new(
-                    if is_worn { 2.0 } else { 1.0 },
-                    if is_worn { GREEN } else { pal_colors.border },
-                );
 
                 let mut card_clicked = false;
                 let frame_res = egui::Frame::new()
-                    .fill(card_fill)
+                    .fill(item_fill)
                     .stroke(card_stroke)
                     .corner_radius(12)
                     .inner_margin(8)
@@ -83,22 +76,6 @@ fn avatar_assets_grid(
                                 img.paint_at(ui, thumb_rect);
                             }
 
-                            if is_worn {
-                                let badge_size = egui::vec2(58.0, 20.0);
-                                let badge_rect = egui::Rect::from_min_size(
-                                    egui::pos2(thumb_rect.right() - 62.0, thumb_rect.top() + 6.0),
-                                    badge_size,
-                                );
-                                p.rect_filled(badge_rect, 10.0, GREEN);
-                                p.text(
-                                    badge_rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    "âœ“ Worn",
-                                    egui::FontId::proportional(11.0),
-                                    Color32::WHITE,
-                                );
-                            }
-
                             ui.add_space(8.0);
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 3.0;
@@ -123,12 +100,31 @@ fn avatar_assets_grid(
                                 egui::Label::new(
                                     RichText::new(&item.asset_type_name)
                                         .size(11.0)
-                                        .color(if is_worn { GREEN } else { pal_colors.muted }),
+                                        .color(pal_colors.muted),
                                 )
                                 .truncate(),
                             );
                         });
                     });
+
+                if is_worn {
+                    let card_rect = frame_res.response.rect;
+                    let corner_s = 32.0;
+                    let corner_rect = egui::Rect::from_min_size(
+                        egui::pos2(card_rect.right() - corner_s, card_rect.top()),
+                        egui::vec2(corner_s, corner_s),
+                    );
+                    ui.painter().rect_filled(
+                        corner_rect,
+                        CornerRadius {
+                            nw: 0,
+                            ne: 12,
+                            sw: 14,
+                            se: 0,
+                        },
+                        accent,
+                    );
+                }
 
                 let resp = frame_res.response.interact(egui::Sense::click());
                 if resp.clicked() || card_clicked {
@@ -275,7 +271,7 @@ impl RustBlox {
                             }
 
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let reload_btn = egui::Button::new("â†» Reload")
+                                let reload_btn = egui::Button::new("Reload")
                                     .fill(pedestal_fill)
                                     .stroke(egui::Stroke::new(1.0, pal_colors.border))
                                     .corner_radius(8);
@@ -522,10 +518,7 @@ impl RustBlox {
                                                             let mut clicked = false;
                                                             let frame_res = egui::Frame::new()
                                                                 .fill(pedestal_fill)
-                                                                .stroke(egui::Stroke::new(
-                                                                    1.0,
-                                                                    pal_colors.border,
-                                                                ))
+                                                                .stroke(egui::Stroke::NONE)
                                                                 .corner_radius(12)
                                                                 .inner_margin(8)
                                                                 .show(ui, |ui| {

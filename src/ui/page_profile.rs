@@ -1,4 +1,5 @@
 ﻿use eframe::egui::{self, Color32, CornerRadius, RichText, Sense};
+
 use crate::app::RustBlox;
 use crate::avatar_3d::render_avatar_viewport;
 use crate::theme::{card_frame, compact, pal, BLUE, GREEN, ORANGE, RED};
@@ -6,51 +7,50 @@ use crate::types::{Action, FriendProfile, Page, User};
 use crate::ui::widgets::*;
 
 impl RustBlox {
-    pub fn paint_pastel_gradient(&self, painter: &egui::Painter, rect: egui::Rect, is_dark: bool) {
-        let mut mesh = egui::Mesh::default();
-        let tl = rect.left_top();
-        let tc = egui::pos2(rect.center().x, rect.top());
-        let tr = rect.right_top();
-        let bl = rect.left_bottom();
-        let bc = egui::pos2(rect.center().x, rect.bottom());
-        let br = rect.right_bottom();
+    fn render_profile_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        profile: &FriendProfile,
+        is_self: bool,
+        acts: &mut Vec<Action>,
+    ) {
+        let max_w = ui.available_width().min(980.0);
+        ui.vertical_centered(|ui| {
+            ui.set_max_width(max_w);
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                self.render_profile_header_card(ui, profile, is_self, acts);
+                ui.add_space(16.0);
 
-        let (c_tl, c_tc, c_tr, c_bl, c_bc, c_br) = if is_dark {
-            (
-                Color32::from_rgb(175, 215, 205),
-                Color32::from_rgb(240, 225, 180),
-                Color32::from_rgb(210, 190, 230),
-                Color32::from_rgb(190, 215, 230),
-                Color32::from_rgb(235, 210, 200),
-                Color32::from_rgb(180, 210, 230),
-            )
-        } else {
-            (
-                Color32::from_rgb(199, 235, 222),
-                Color32::from_rgb(250, 238, 185),
-                Color32::from_rgb(222, 198, 238),
-                Color32::from_rgb(212, 233, 245),
-                Color32::from_rgb(248, 230, 220),
-                Color32::from_rgb(205, 232, 245),
-            )
-        };
+                if profile.playing_game.is_some() {
+                    self.render_profile_playing_card(ui, profile, acts);
+                    ui.add_space(16.0);
+                }
 
-        let idx = mesh.vertices.len() as u32;
-        let w_uv = egui::epaint::WHITE_UV;
-        mesh.vertices.push(egui::epaint::Vertex { pos: tl, uv: w_uv, color: c_tl });
-        mesh.vertices.push(egui::epaint::Vertex { pos: tc, uv: w_uv, color: c_tc });
-        mesh.vertices.push(egui::epaint::Vertex { pos: tr, uv: w_uv, color: c_tr });
-        mesh.vertices.push(egui::epaint::Vertex { pos: bl, uv: w_uv, color: c_bl });
-        mesh.vertices.push(egui::epaint::Vertex { pos: bc, uv: w_uv, color: c_bc });
-        mesh.vertices.push(egui::epaint::Vertex { pos: br, uv: w_uv, color: c_br });
+                self.render_profile_wearing_section(ui, profile, acts);
 
-        mesh.indices.extend_from_slice(&[idx, idx + 1, idx + 4, idx, idx + 4, idx + 3]);
-        mesh.indices.extend_from_slice(&[idx + 1, idx + 2, idx + 5, idx + 1, idx + 5, idx + 4]);
+                if !profile.experiences.is_empty() {
+                    ui.add_space(18.0);
+                    let p = pal(ui);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.label(RichText::new("Creations").size(16.5).strong());
+                        ui.label(
+                            RichText::new(format!("{}", profile.experiences.len()))
+                                .size(12.5)
+                                .color(p.muted),
+                        );
+                    });
+                    ui.add_space(8.0);
+                    let preview = self.current_card_preview();
+                    wide_grid_with_width(ui, &profile.experiences, &self.wide, preview, 220.0, acts);
+                }
 
-        painter.add(egui::Shape::Mesh(mesh.into()));
+                ui.add_space(28.0);
+            });
+        });
     }
 
-    pub fn render_profile_view(
+    fn render_profile_header_card(
         &mut self,
         ui: &mut egui::Ui,
         profile: &FriendProfile,
@@ -58,600 +58,733 @@ impl RustBlox {
         acts: &mut Vec<Action>,
     ) {
         let p = pal(ui);
-        let win_w = ui.available_width();
-        let is_dark = ui.visuals().dark_mode;
+        card_frame(ui, 20).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 22.0;
 
-        egui::ScrollArea::vertical()
-            .id_salt(if is_self { "my_profile_scroll" } else { "user_profile_scroll" })
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_width(win_w);
+                self.render_profile_avatar_box(ui, profile, is_self);
 
-                // 1. Top Panoramic Hero Banner with Pastel Iridescent Gradient
-                let banner_h = (win_w * 0.30).clamp(240.0, 310.0);
-                let (banner_rect, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), banner_h),
-                    Sense::hover(),
-                );
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 8.0;
 
-                // Paint pastel gradient
-                self.paint_pastel_gradient(ui.painter(), banner_rect, is_dark);
-                ui.painter().rect_stroke(
-                    banner_rect,
-                    CornerRadius::same(16),
-                    egui::Stroke::new(1.0, p.border),
-                    egui::StrokeKind::Inside,
-                );
-
-                // Center avatar inside banner
-                let avatar_w = (banner_h * 0.95).min(banner_rect.width() * 0.5);
-                let avatar_rect = egui::Rect::from_center_size(
-                    banner_rect.center(),
-                    egui::vec2(avatar_w, banner_h * 0.95),
-                );
-
-                if self.profile_3d_mode {
-                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(avatar_rect));
-                    render_avatar_viewport(
-                        &mut child,
-                        &mut self.avatar_3d,
-                        Some(&profile.avatar),
-                        avatar_rect.size(),
-                        is_dark,
-                    );
-                } else if !profile.avatar.is_empty() {
-                    egui::Image::new(&profile.avatar)
-                        .fit_to_exact_size(avatar_rect.size())
-                        .paint_at(ui, avatar_rect);
-                }
-
-                // 3D / 2D toggle pill in the top-right corner of banner
-                let toggle_size = egui::vec2(44.0, 26.0);
-                let toggle_rect = egui::Rect::from_min_size(
-                    egui::pos2(banner_rect.right() - 56.0, banner_rect.top() + 14.0),
-                    toggle_size,
-                );
-                let toggle_resp = ui.allocate_rect(toggle_rect, Sense::click());
-                let toggle_hovered = toggle_resp.hovered();
-                ui.painter().rect_filled(
-                    toggle_rect,
-                    CornerRadius::same(6),
-                    if toggle_hovered {
-                        Color32::from_black_alpha(170)
-                    } else {
-                        Color32::from_black_alpha(120)
-                    },
-                );
-                ui.painter().rect_stroke(
-                    toggle_rect,
-                    CornerRadius::same(6),
-                    egui::Stroke::new(1.0, Color32::from_white_alpha(45)),
-                    egui::StrokeKind::Inside,
-                );
-                ui.painter().text(
-                    toggle_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    if self.profile_3d_mode { "2D" } else { "3D" },
-                    egui::FontId::proportional(12.0),
-                    Color32::WHITE,
-                );
-                if toggle_resp.clicked() {
-                    self.profile_3d_mode = !self.profile_3d_mode;
-                    if self.profile_3d_mode && self.avatar_3d.model.is_none() {
-                        self.load_avatar_3d();
-                    }
-                }
-
-                ui.add_space(16.0);
-
-                // 2. Identity Row (Headshot circle + Names + Stats + Action Buttons)
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 18.0;
-
-                    // Avatar headshot circle with presence status badge
-                    let headshot_size = 96.0;
-                    let (headshot_rect, _) = ui.allocate_exact_size(
-                        egui::vec2(headshot_size, headshot_size),
-                        Sense::hover(),
-                    );
-
-                    let headshot_url = if !profile.user.headshot.is_empty() {
-                        &profile.user.headshot
-                    } else {
-                        &profile.avatar
-                    };
-                    if !headshot_url.is_empty() {
-                        egui::Image::new(headshot_url)
-                            .corner_radius(CornerRadius::same(headshot_size as u8 / 2))
-                            .paint_at(ui, headshot_rect);
-                    }
-                    ui.painter().circle_stroke(
-                        headshot_rect.center(),
-                        headshot_size * 0.5,
-                        egui::Stroke::new(3.0, p.card_bg),
-                    );
-
-                    // Presence indicator dot at bottom-right
-                    let (dot_color, presence_label) = match profile.user.presence {
-                        2 => (
-                            GREEN,
-                            if profile.user.location.is_empty() {
-                                "In Game".to_string()
-                            } else {
-                                format!("Playing {}", profile.user.location)
-                            },
-                        ),
-                        3 => (ORANGE, "In Studio".to_string()),
-                        1 => (BLUE, "Online".to_string()),
-                        _ => (p.muted, "Offline".to_string()),
-                    };
-                    let dot_center = headshot_rect.center()
-                        + egui::vec2(headshot_size * 0.35, headshot_size * 0.35);
-                    ui.painter().circle_filled(dot_center, 8.5, p.card_bg);
-                    ui.painter().circle_filled(dot_center, 6.0, dot_color);
-                    let dot_rect = egui::Rect::from_center_size(dot_center, egui::vec2(16.0, 16.0));
-                    ui.allocate_rect(dot_rect, Sense::hover()).on_hover_text(presence_label);
-
-                    // User Names and Stats
-                    ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(&profile.user.display).size(26.0).strong());
-                            if profile.verified || profile.user.verified {
-                                verified_badge_tip(ui, 20.0, "Verified Account");
-                            }
-                        });
-                        ui.label(
-                            RichText::new(format!("@{}", profile.user.name))
-                                .size(14.0)
-                                .color(p.muted),
-                        );
-                        ui.add_space(6.0);
-
-                        // Stat Chips
+                    // Top row: Display name + action buttons
+                    ui.horizontal(|ui| {
+                        ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 8.0;
-                            for (count, label) in [
-                                (profile.friends, "Friends"),
-                                (profile.followers, "Followers"),
-                                (profile.following, "Following"),
-                            ] {
-                                egui::Frame::new()
-                                    .fill(p.surface_bg)
-                                    .stroke(egui::Stroke::new(1.0, p.border))
-                                    .corner_radius(12)
-                                    .inner_margin(egui::Margin::symmetric(12, 5))
-                                    .show(ui, |ui| {
-                                        ui.label(
-                                            RichText::new(format!("{} {}", compact(count), label))
-                                                .size(12.5)
-                                                .strong(),
-                                        );
-                                    });
+                            ui.label(RichText::new(&profile.user.display).size(24.0).strong());
+                            if profile.verified || profile.user.verified {
+                                verified_badge_tip(ui, 17.0, "Verified Account");
                             }
-                            if !profile.created.is_empty() {
-                                egui::Frame::new()
-                                    .fill(p.surface_bg)
-                                    .stroke(egui::Stroke::new(1.0, p.border))
-                                    .corner_radius(12)
-                                    .inner_margin(egui::Margin::symmetric(12, 5))
-                                    .show(ui, |ui| {
-                                        ui.label(
-                                            RichText::new(format!("Joined {}", profile.created))
-                                                .size(12.5)
-                                                .color(p.muted),
-                                        );
-                                    });
-                            }
+                            render_presence_pill(ui, profile);
+                        });
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            self.render_profile_actions(ui, profile, is_self, acts);
                         });
                     });
 
-                    // Action buttons (right aligned)
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-
-                        // More options popup
-                        let more_btn = egui::Button::new(RichText::new("Â·Â·Â·").size(15.0).strong())
-                            .fill(p.hover_bg)
-                            .stroke(egui::Stroke::new(1.0, p.border))
-                            .corner_radius(8)
-                            .min_size(egui::vec2(36.0, 32.0));
-                        let more_resp = ui.add(more_btn);
-                        more_resp.context_menu(|ui| {
-                            if ui.button("ðŸ“‹ Copy Profile Link").clicked() {
-                                ui.ctx().copy_text(format!(
-                                    "https://www.roblox.com/users/{}/profile",
-                                    profile.user.id
-                                ));
-                                self.status = "Copied profile link!".to_string();
-                                ui.close();
-                            }
-                            if ui.button("ðŸ†” Copy User ID").clicked() {
-                                ui.ctx().copy_text(profile.user.id.to_string());
-                                self.status = "Copied user ID!".to_string();
-                                ui.close();
-                            }
-                            if ui.button("ðŸŒ Open on Roblox.com").clicked() {
-                                acts.push(Action::OpenUrl(format!(
-                                    "https://www.roblox.com/users/{}/profile",
-                                    profile.user.id
-                                )));
-                                ui.close();
-                            }
-                            if is_self {
-                                if ui.button("â†» Reload Profile").clicked() {
-                                    acts.push(Action::RefreshMyProfile);
-                                    ui.close();
-                                }
-                            }
-                        });
-
-                        if is_self {
-                            // Edit avatar button -> goes to Avatar customization!
-                            let edit_avatar_btn = egui::Button::new(
-                                RichText::new("Edit avatar")
-                                    .size(13.0)
-                                    .strong()
-                                    .color(p.text),
-                            )
-                            .fill(p.hover_bg)
-                            .stroke(egui::Stroke::new(1.0, p.border))
-                            .corner_radius(8)
-                            .min_size(egui::vec2(86.0, 32.0));
-                            if ui.add(edit_avatar_btn).clicked() {
-                                acts.push(Action::Go(Page::Avatar));
-                            }
-
-                            // Edit profile button -> toggles inline bio editing
-                            let edit_prof_btn = egui::Button::new(
-                                RichText::new("Edit profile")
-                                    .size(13.0)
-                                    .strong()
-                                    .color(p.text),
-                            )
-                            .fill(p.hover_bg)
-                            .stroke(egui::Stroke::new(1.0, p.border))
-                            .corner_radius(8)
-                            .min_size(egui::vec2(86.0, 32.0));
-                            if ui.add(edit_prof_btn).clicked() {
-                                self.profile_editing = !self.profile_editing;
-                                if self.profile_editing {
-                                    self.profile_edit_bio = profile.description.clone();
-                                }
-                            }
-                        } else {
-                            let is_friend = self.friends.iter().any(|f| f.id == profile.user.id);
-                            let is_sent = self.friend_sent.contains(&profile.user.id);
-
-                            if is_friend {
-                                let friend_pill = egui::Button::new(
-                                    RichText::new("âœ“ Friends").size(13.0).strong().color(p.muted),
-                                )
-                                .fill(p.hover_bg)
-                                .stroke(egui::Stroke::new(1.0, p.border))
-                                .corner_radius(8);
-                                ui.add_enabled(false, friend_pill);
-                            } else if is_sent {
-                                let sent_pill = egui::Button::new(
-                                    RichText::new("Request Sent").size(13.0).color(p.muted),
-                                )
-                                .fill(p.hover_bg)
-                                .stroke(egui::Stroke::new(1.0, p.border))
-                                .corner_radius(8);
-                                ui.add_enabled(false, sent_pill);
-                            } else {
-                                let add_btn = egui::Button::new(
-                                    RichText::new("+ Add Friend")
-                                        .size(13.0)
-                                        .strong()
-                                        .color(Color32::WHITE),
-                                )
-                                .fill(GREEN)
-                                .corner_radius(8);
-                                if ui.add(add_btn).clicked() {
-                                    acts.push(Action::SendFriendRequest(
-                                        profile.user.id,
-                                        profile.user.name.clone(),
-                                    ));
-                                }
-                            }
-
-                            if let Some(pid) = profile.user.place_id {
-                                let join_btn = egui::Button::new(
-                                    RichText::new("â–¶  Join Game")
-                                        .size(13.0)
-                                        .strong()
-                                        .color(Color32::WHITE),
-                                )
-                                .fill(GREEN)
-                                .corner_radius(8);
-                                if ui.add(join_btn).clicked() {
-                                    acts.push(Action::JoinPlace(pid));
-                                }
-                            }
-                        }
-                    });
-                });
-
-                ui.add_space(14.0);
-
-                // 3. About / Bio Section
-                if self.profile_editing && is_self {
-                    card_frame(ui, 12).show(ui, |ui| {
-                        ui.label(RichText::new("Edit Bio / Description").strong().size(14.0));
-                        ui.add_space(4.0);
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.profile_edit_bio)
-                                .desired_rows(3)
-                                .desired_width(f32::INFINITY)
-                                .hint_text("Write something about yourself..."),
-                        );
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            if self.profile_saving_bio {
-                                ui.spinner();
-                                ui.label("Saving...");
-                            } else {
-                                let save_btn = egui::Button::new(
-                                    RichText::new("Save").strong().color(Color32::WHITE),
-                                )
-                                .fill(GREEN)
-                                .corner_radius(6);
-                                if ui.add(save_btn).clicked() {
-                                    acts.push(Action::SaveBio(self.profile_edit_bio.clone()));
-                                }
-                                if ui.button("Cancel").clicked() {
-                                    self.profile_editing = false;
-                                }
-                            }
-                            if let Some(e) = &self.profile_save_err {
-                                ui.colored_label(RED, e);
-                            }
-                        });
-                    });
-                } else if !profile.description.is_empty() {
-                    let bio = &profile.description;
-                    let is_long = bio.len() > 180;
+                    // Subtitle row: @username + join date + user ID
                     ui.horizontal_wrapped(|ui| {
-                        if is_long && !self.profile_bio_expanded {
-                            let truncated: String = bio.chars().take(180).collect();
-                            ui.label(RichText::new(format!("{truncated}...")).size(13.5));
-                            if ui.link(RichText::new("more").color(BLUE)).clicked() {
-                                self.profile_bio_expanded = true;
-                            }
-                        } else {
-                            ui.label(RichText::new(bio).size(13.5));
-                            if is_long {
-                                if ui.link(RichText::new("less").color(BLUE)).clicked() {
-                                    self.profile_bio_expanded = false;
-                                }
-                            }
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.label(
+                            RichText::new(format!("@{}", profile.user.name))
+                                .size(13.5)
+                                .color(p.muted),
+                        );
+                        if !profile.created.is_empty() {
+                            ui.label(RichText::new("•").size(12.0).color(p.muted));
+                            ui.label(
+                                RichText::new(format!("Joined {}", profile.created))
+                                    .size(12.5)
+                                    .color(p.muted),
+                            );
+                        }
+                        ui.label(RichText::new("•").size(12.0).color(p.muted));
+                        let id_lbl = ui
+                            .add(
+                                egui::Label::new(
+                                    RichText::new(format!("ID {}", profile.user.id))
+                                        .size(12.0)
+                                        .color(p.muted),
+                                )
+                                .sense(Sense::click()),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text("Click to copy user ID");
+                        if id_lbl.clicked() {
+                            ui.ctx().copy_text(profile.user.id.to_string());
+                            self.status = "Copied user ID!".to_string();
                         }
                     });
-                } else if is_self {
-                    ui.label(
-                        RichText::new("No bio yet. Click 'Edit profile' to add one!")
-                            .size(13.0)
-                            .italics()
-                            .color(p.muted),
-                    );
+
+                    // Clean metric row
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        for (count, label) in [
+                            (profile.friends, "Friends"),
+                            (profile.followers, "Followers"),
+                            (profile.following, "Following"),
+                        ] {
+                            egui::Frame::new()
+                                .fill(p.surface_bg)
+                                .stroke(egui::Stroke::new(1.0, p.border))
+                                .corner_radius(10)
+                                .inner_margin(egui::Margin::symmetric(12, 6))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 5.0;
+                                        ui.label(
+                                            RichText::new(compact(count))
+                                                .size(13.5)
+                                                .strong()
+                                                .color(p.text),
+                                        );
+                                        ui.label(
+                                            RichText::new(label).size(12.5).color(p.muted),
+                                        );
+                                    });
+                                })
+                                .response
+                                .on_hover_text(format!(
+                                    "{} {}",
+                                    crate::api::format_commas(count),
+                                    label
+                                ));
+                        }
+                    });
+
+                    ui.add_space(2.0);
+                    let div_rect = ui.allocate_space(egui::vec2(ui.available_width(), 1.0)).1;
+                    ui.painter()
+                        .rect_filled(div_rect, 0.0, p.border.linear_multiply(0.75));
+                    ui.add_space(2.0);
+
+                    self.render_profile_bio(ui, profile, is_self, acts);
+                });
+            });
+        });
+    }
+
+    fn render_profile_avatar_box(
+        &mut self,
+        ui: &mut egui::Ui,
+        profile: &FriendProfile,
+        is_self: bool,
+    ) {
+        let p = pal(ui);
+        let box_size = egui::vec2(174.0, 214.0);
+        let (outer_rect, _) = ui.allocate_exact_size(box_size, Sense::hover());
+
+        ui.painter().rect(
+            outer_rect,
+            CornerRadius::same(14),
+            p.surface_bg,
+            egui::Stroke::new(1.0, p.border),
+            egui::StrokeKind::Inside,
+        );
+
+        let inner_rect = outer_rect.shrink(3.0);
+        let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(inner_rect));
+
+        if is_self && self.profile_3d_mode {
+            render_avatar_viewport(
+                &mut child_ui,
+                &mut self.avatar_3d,
+                (!profile.avatar.is_empty()).then_some(profile.avatar.as_str()),
+                inner_rect.size(),
+                self.settings.dark,
+            );
+        } else if !profile.avatar.is_empty() {
+            child_ui.centered_and_justified(|ui| {
+                ui.add(
+                    egui::Image::new(&profile.avatar)
+                        .fit_to_exact_size(inner_rect.size())
+                        .corner_radius(11),
+                );
+            });
+        } else {
+            let initial = profile
+                .user
+                .display
+                .chars()
+                .next()
+                .unwrap_or('?')
+                .to_string();
+            child_ui.painter().text(
+                inner_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                initial,
+                egui::FontId::proportional(42.0),
+                p.muted,
+            );
+        }
+
+        if is_self {
+            let toggle_rect = egui::Rect::from_min_size(
+                egui::pos2(outer_rect.right() - 44.0, outer_rect.top() + 8.0),
+                egui::vec2(36.0, 22.0),
+            );
+            let mut overlay = ui.new_child(egui::UiBuilder::new().max_rect(toggle_rect));
+            let label = if self.profile_3d_mode { "2D" } else { "3D" };
+            let tip = if self.profile_3d_mode {
+                "Switch to 2D avatar image"
+            } else {
+                "Switch to interactive 3D avatar"
+            };
+            let btn = egui::Button::new(RichText::new(label).size(11.0).strong().color(p.text))
+                .fill(p.card_bg)
+                .stroke(egui::Stroke::new(1.0, p.border))
+                .corner_radius(11);
+            if overlay
+                .add_sized(toggle_rect.size(), btn)
+                .on_hover_text(tip)
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                self.profile_3d_mode = !self.profile_3d_mode;
+                if self.profile_3d_mode && self.avatar_3d.model.is_none() {
+                    self.load_avatar_3d();
+                }
+            }
+        }
+    }
+
+    fn render_profile_actions(
+        &mut self,
+        ui: &mut egui::Ui,
+        profile: &FriendProfile,
+        is_self: bool,
+        acts: &mut Vec<Action>,
+    ) {
+        let p = pal(ui);
+        ui.spacing_mut().item_spacing.x = 6.0;
+
+        let more_btn = egui::Button::new(RichText::new("•••").size(12.0).color(p.text))
+            .fill(p.surface_bg)
+            .stroke(egui::Stroke::new(1.0, p.border))
+            .corner_radius(8)
+            .min_size(egui::vec2(32.0, 30.0));
+        let more_resp = ui
+            .add(more_btn)
+            .on_hover_text("More options")
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        more_resp.context_menu(|ui| {
+            self.render_profile_more_menu(ui, profile, is_self, acts);
+        });
+        if more_resp.clicked() {
+            egui::Popup::toggle_id(ui.ctx(), more_resp.id.with("menu"));
+        }
+        egui::Popup::from_response(&more_resp)
+            .id(more_resp.id.with("menu"))
+            .show(|ui| {
+                ui.set_min_width(160.0);
+                self.render_profile_more_menu(ui, profile, is_self, acts);
+            });
+
+        if is_self {
+            let edit_label = if self.profile_editing {
+                "Close editor"
+            } else {
+                "Edit bio"
+            };
+            let edit_btn = egui::Button::new(RichText::new(edit_label).size(12.5).color(p.text))
+                .fill(p.surface_bg)
+                .stroke(egui::Stroke::new(1.0, p.border))
+                .corner_radius(8)
+                .min_size(egui::vec2(0.0, 30.0));
+            if ui
+                .add(edit_btn)
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                self.profile_editing = !self.profile_editing;
+                if self.profile_editing {
+                    self.profile_edit_bio = profile.description.clone();
+                }
+            }
+
+            let avatar_btn = egui::Button::new(
+                RichText::new("Customize Avatar")
+                    .size(12.5)
+                    .strong()
+                    .color(Color32::WHITE),
+            )
+            .fill(BLUE)
+            .corner_radius(8)
+            .min_size(egui::vec2(0.0, 30.0));
+            if ui
+                .add(avatar_btn)
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                acts.push(Action::Go(Page::Avatar));
+            }
+        } else {
+            let is_friend = self.friends.iter().any(|f| f.id == profile.user.id);
+            let is_sent = self.friend_sent.contains(&profile.user.id);
+
+            if is_friend {
+                egui::Frame::new()
+                    .fill(p.surface_bg)
+                    .stroke(egui::Stroke::new(1.0, p.border))
+                    .corner_radius(8)
+                    .inner_margin(egui::Margin::symmetric(12, 6))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Friends").size(12.5).strong().color(GREEN));
+                    });
+            } else if is_sent {
+                egui::Frame::new()
+                    .fill(p.surface_bg)
+                    .stroke(egui::Stroke::new(1.0, p.border))
+                    .corner_radius(8)
+                    .inner_margin(egui::Margin::symmetric(12, 6))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Request Sent").size(12.5).color(p.muted));
+                    });
+            } else {
+                let add_btn = egui::Button::new(
+                    RichText::new("Add Friend").size(12.5).strong().color(p.text),
+                )
+                .fill(p.surface_bg)
+                .stroke(egui::Stroke::new(1.0, p.border))
+                .corner_radius(8)
+                .min_size(egui::vec2(0.0, 30.0));
+                if ui
+                    .add(add_btn)
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    acts.push(Action::SendFriendRequest(
+                        profile.user.id,
+                        profile.user.name.clone(),
+                    ));
+                }
+            }
+
+            if let Some(pid) = profile.user.place_id {
+                let join_btn = egui::Button::image_and_text(
+                    egui::Image::new(egui::include_image!("../../assets/icon_play.png"))
+                        .fit_to_exact_size(egui::vec2(12.0, 12.0))
+                        .tint(Color32::WHITE),
+                    RichText::new("Join Game")
+                        .size(12.5)
+                        .strong()
+                        .color(Color32::WHITE),
+                )
+                .fill(GREEN)
+                .corner_radius(8)
+                .min_size(egui::vec2(0.0, 30.0));
+                if ui
+                    .add(join_btn)
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    acts.push(Action::JoinPlace(pid));
+                }
+            }
+        }
+    }
+
+    fn render_profile_more_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        profile: &FriendProfile,
+        is_self: bool,
+        acts: &mut Vec<Action>,
+    ) {
+        if ui.button("Copy profile link").clicked() {
+            ui.ctx().copy_text(format!(
+                "https://www.roblox.com/users/{}/profile",
+                profile.user.id
+            ));
+            self.status = "Copied profile link!".to_string();
+            ui.close();
+        }
+        if ui.button("Copy user ID").clicked() {
+            ui.ctx().copy_text(profile.user.id.to_string());
+            self.status = "Copied user ID!".to_string();
+            ui.close();
+        }
+        if ui.button("Open in browser").clicked() {
+            acts.push(Action::OpenUrl(format!(
+                "https://www.roblox.com/users/{}/profile",
+                profile.user.id
+            )));
+            ui.close();
+        }
+        if is_self {
+            ui.separator();
+            if ui.button("Refresh profile").clicked() {
+                acts.push(Action::RefreshMyProfile);
+                ui.close();
+            }
+        }
+    }
+
+    fn render_profile_bio(
+        &mut self,
+        ui: &mut egui::Ui,
+        profile: &FriendProfile,
+        is_self: bool,
+        acts: &mut Vec<Action>,
+    ) {
+        let p = pal(ui);
+        if self.profile_editing && is_self {
+            ui.vertical(|ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.profile_edit_bio)
+                        .desired_width(ui.available_width())
+                        .desired_rows(3)
+                        .hint_text("Write something about yourself..."),
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let save_label = if self.profile_saving_bio {
+                        "Saving..."
+                    } else {
+                        "Save bio"
+                    };
+                    let save_btn = egui::Button::new(
+                        RichText::new(save_label)
+                            .size(12.5)
+                            .strong()
+                            .color(Color32::WHITE),
+                    )
+                    .fill(BLUE)
+                    .corner_radius(8);
+                    if ui
+                        .add_enabled(!self.profile_saving_bio, save_btn)
+                        .clicked()
+                    {
+                        acts.push(Action::SaveBio(self.profile_edit_bio.clone()));
+                    }
+                    let cancel_btn =
+                        egui::Button::new(RichText::new("Cancel").size(12.5).color(p.text))
+                            .fill(p.surface_bg)
+                            .stroke(egui::Stroke::new(1.0, p.border))
+                            .corner_radius(8);
+                    if ui.add(cancel_btn).clicked() {
+                        self.profile_editing = false;
+                    }
+                    if let Some(e) = &self.profile_save_err {
+                        ui.label(RichText::new(e).size(12.0).color(RED));
+                    }
+                });
+            });
+            return;
+        }
+
+        if !profile.description.is_empty() {
+            let bio = &profile.description;
+            let char_count = bio.chars().count();
+            let line_count = bio.lines().count();
+            let is_long = char_count > 220 || line_count > 3;
+
+            let shown = if is_long && !self.profile_bio_expanded {
+                let mut preview: String = bio.lines().take(3).collect::<Vec<_>>().join("\n");
+                if preview.chars().count() > 220 {
+                    preview = preview.chars().take(217).collect::<String>() + "...";
+                } else if line_count > 3 {
+                    preview.push_str("...");
+                }
+                preview
+            } else {
+                bio.clone()
+            };
+
+            ui.add(
+                egui::Label::new(RichText::new(shown).size(13.0).color(p.text)).wrap(),
+            );
+
+            if is_long {
+                let link_text = if self.profile_bio_expanded {
+                    "Show less"
+                } else {
+                    "Show more"
+                };
+                if ui
+                    .add(
+                        egui::Label::new(
+                            RichText::new(link_text).size(12.0).strong().color(BLUE),
+                        )
+                        .sense(Sense::click()),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    self.profile_bio_expanded = !self.profile_bio_expanded;
+                }
+            }
+        } else {
+            let empty_msg = if is_self {
+                "No bio set yet."
+            } else {
+                "This user has no bio."
+            };
+            ui.label(RichText::new(empty_msg).size(12.5).color(p.muted));
+        }
+    }
+
+    fn render_profile_playing_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        profile: &FriendProfile,
+        acts: &mut Vec<Action>,
+    ) {
+        let Some(game) = &profile.playing_game else {
+            return;
+        };
+        let p = pal(ui);
+
+        ui.horizontal(|ui| {
+            let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 16.0), Sense::hover());
+            ui.painter().circle_filled(dot_rect.center(), 4.5, GREEN);
+            ui.label(RichText::new("Currently Playing").size(16.5).strong());
+        });
+        ui.add_space(6.0);
+
+        card_frame(ui, 14).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 16.0;
+                let t = thumb(
+                    ui,
+                    self.wide.get(&game.universe_id),
+                    egui::vec2(176.0, 100.0),
+                    10,
+                );
+                if t.clicked() {
+                    acts.push(Action::Open(game.clone()));
                 }
 
-                // 4. Currently Wearing Carousel
-                ui.add_space(20.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Currently Wearing").size(18.0).strong());
-                    if !profile.currently_wearing.is_empty() {
-                        ui.add_space(4.0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    let title = ui
+                        .add(
+                            egui::Label::new(RichText::new(&game.name).size(16.5).strong())
+                                .sense(Sense::click())
+                                .wrap(),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if title.clicked() {
+                        acts.push(Action::Open(game.clone()));
+                    }
+                    ui.label(
+                        RichText::new(format!("By {}", game.creator))
+                            .size(12.5)
+                            .color(p.muted),
+                    );
+                    if game.playing > 0 {
                         ui.label(
-                            RichText::new(format!("({})", profile.currently_wearing.len()))
-                                .size(13.0)
-                                .color(p.muted),
+                            RichText::new(format!("{} active", compact(game.playing)))
+                                .size(12.0)
+                                .color(GREEN),
                         );
                     }
                 });
-                ui.add_space(8.0);
 
-                if profile.currently_wearing.is_empty() {
-                    ui.label(RichText::new("No worn items to display.").size(13.0).color(p.muted));
-                } else {
-                    egui::ScrollArea::horizontal()
-                        .id_salt(if is_self { "my_wearing_scroll" } else { "user_wearing_scroll" })
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 10.0;
-                                for item in &profile.currently_wearing {
-                                    let card_w = 126.0;
-                                    let card_h = 176.0;
-                                    let (card_rect, card_resp) = ui.allocate_exact_size(
-                                        egui::vec2(card_w, card_h),
-                                        Sense::click(),
-                                    );
-                                    let card_resp = card_resp
-                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(pid) = profile.user.place_id {
+                        let join_btn = egui::Button::image_and_text(
+                            egui::Image::new(egui::include_image!("../../assets/icon_play.png"))
+                                .fit_to_exact_size(egui::vec2(13.0, 13.0))
+                                .tint(Color32::WHITE),
+                            RichText::new("Join")
+                                .size(13.5)
+                                .strong()
+                                .color(Color32::WHITE),
+                        )
+                        .fill(GREEN)
+                        .corner_radius(10)
+                        .min_size(egui::vec2(92.0, 36.0));
+                        if ui
+                            .add(join_btn)
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            acts.push(Action::JoinPlace(pid));
+                        }
+                    }
+                });
+            });
+        });
+    }
 
-                                    let hovered = card_resp.hovered();
-                                    let bg_color =
-                                        if hovered { p.hover_bg } else { p.surface_bg };
-                                    let stroke_color = if hovered { GREEN } else { p.border };
+    fn render_profile_wearing_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        profile: &FriendProfile,
+        acts: &mut Vec<Action>,
+    ) {
+        let p = pal(ui);
+        let dark = self.settings.dark;
+        let rb_gold = if dark {
+            Color32::from_rgb(245, 194, 66)
+        } else {
+            Color32::from_rgb(184, 126, 8)
+        };
 
-                                    ui.painter().rect_filled(
-                                        card_rect,
-                                        CornerRadius::same(10),
-                                        bg_color,
-                                    );
-                                    ui.painter().rect_stroke(
-                                        card_rect,
-                                        CornerRadius::same(10),
-                                        egui::Stroke::new(
-                                            if hovered { 1.5 } else { 1.0 },
-                                            stroke_color,
-                                        ),
-                                        egui::StrokeKind::Inside,
-                                    );
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.label(RichText::new("Currently Wearing").size(16.5).strong());
+            if !profile.currently_wearing.is_empty() {
+                ui.label(
+                    RichText::new(format!("{}", profile.currently_wearing.len()))
+                        .size(12.5)
+                        .color(p.muted),
+                );
+            }
+        });
+        ui.add_space(8.0);
 
-                                    // Thumbnail 110x110
-                                    let thumb_rect = egui::Rect::from_min_size(
-                                        egui::pos2(card_rect.left() + 8.0, card_rect.top() + 8.0),
-                                        egui::vec2(110.0, 110.0),
-                                    );
-                                    ui.painter().rect_filled(
-                                        thumb_rect,
-                                        CornerRadius::same(8),
-                                        if hovered { p.selected_bg } else { p.hover_bg },
-                                    );
-                                    if !item.thumb.is_empty() {
-                                        egui::Image::new(&item.thumb)
-                                            .corner_radius(CornerRadius::same(8))
-                                            .fit_to_exact_size(thumb_rect.size())
-                                            .paint_at(ui, thumb_rect);
-                                    }
+        if profile.currently_wearing.is_empty() {
+            card_frame(ui, 16).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new("Not wearing any visible items.")
+                        .size(13.0)
+                        .color(p.muted),
+                );
+            });
+            return;
+        }
 
-                                    // Item title
-                                    let title_pos =
-                                        egui::pos2(card_rect.left() + 8.0, card_rect.top() + 124.0);
-                                    let clean_title: String = if item.name.len() > 18 {
-                                        format!(
-                                            "{}...",
-                                            item.name.chars().take(16).collect::<String>()
-                                        )
-                                    } else {
-                                        item.name.clone()
-                                    };
-                                    ui.painter().text(
-                                        title_pos,
-                                        egui::Align2::LEFT_TOP,
-                                        clean_title,
-                                        egui::FontId::proportional(12.0),
-                                        p.text,
-                                    );
+        egui::ScrollArea::horizontal()
+            .id_salt("wearing_scroll")
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    for item in &profile.currently_wearing {
+                        let card_size = egui::vec2(134.0, 192.0);
+                        let (card_rect, resp) = ui.allocate_exact_size(card_size, Sense::click());
+                        let hovered = resp.hovered();
 
-                                    // Price row
-                                    let price_pos =
-                                        egui::pos2(card_rect.left() + 8.0, card_rect.top() + 148.0);
-                                    let price_str = if let Some(pr) = item.price {
-                                        format!("â—Ž {}", compact(pr))
-                                    } else {
-                                        "Free".to_string()
-                                    };
-                                    ui.painter().text(
-                                        price_pos,
-                                        egui::Align2::LEFT_TOP,
-                                        price_str,
-                                        egui::FontId::proportional(11.5),
-                                        if item.price.is_some() { p.muted } else { GREEN },
-                                    );
+                        let border_color = if hovered { BLUE } else { p.border };
+                        ui.painter().rect(
+                            card_rect,
+                            CornerRadius::same(12),
+                            p.card_bg,
+                            egui::Stroke::new(if hovered { 1.5 } else { 1.0 }, border_color),
+                            egui::StrokeKind::Inside,
+                        );
 
-                                    // Tooltip
-                                    let mut card_resp = card_resp;
-                                    card_resp = card_resp.on_hover_ui(|ui| {
-                                        ui.label(RichText::new(&item.name).size(13.0).strong());
+                        let thumb_rect = egui::Rect::from_min_size(
+                            egui::pos2(card_rect.left() + 12.0, card_rect.top() + 10.0),
+                            egui::vec2(110.0, 110.0),
+                        );
+                        ui.painter()
+                            .rect_filled(thumb_rect, CornerRadius::same(8), p.surface_bg);
+                        if !item.thumb.is_empty() {
+                            egui::Image::new(&item.thumb)
+                                .corner_radius(8)
+                                .paint_at(ui, thumb_rect.shrink(3.0));
+                        }
+
+                        let body_rect = egui::Rect::from_min_max(
+                            egui::pos2(card_rect.left() + 10.0, thumb_rect.bottom() + 8.0),
+                            egui::pos2(card_rect.right() - 10.0, card_rect.bottom() - 8.0),
+                        );
+                        let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body_rect));
+                        body_ui.set_width(body_rect.width());
+                        body_ui.spacing_mut().item_spacing.y = 2.0;
+
+                        body_ui.add(
+                            egui::Label::new(
+                                RichText::new(&item.name)
+                                    .size(12.5)
+                                    .strong()
+                                    .color(p.text),
+                            )
+                            .truncate(),
+                        );
+                        body_ui.add(
+                            egui::Label::new(
+                                RichText::new(&item.asset_type_name)
+                                    .size(11.0)
+                                    .color(p.muted),
+                            )
+                            .truncate(),
+                        );
+
+                        body_ui.add_space(2.0);
+                        if let Some(pr) = item.price {
+                            body_ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                let (ic_rect, _) =
+                                    ui.allocate_exact_size(egui::vec2(12.0, 13.0), Sense::hover());
+                                draw_robux_icon(ui.painter(), ic_rect.center(), 12.0, rb_gold);
+                                ui.label(
+                                    RichText::new(crate::api::format_commas(pr))
+                                        .size(11.5)
+                                        .strong()
+                                        .color(p.text),
+                                );
+                            });
+                        } else {
+                            body_ui.label(RichText::new("Free").size(11.5).strong().color(GREEN));
+                        }
+
+                        let resp = resp
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_ui(|ui| {
+                                ui.set_max_width(240.0);
+                                ui.label(RichText::new(&item.name).size(13.0).strong());
+                                ui.label(
+                                    RichText::new(&item.asset_type_name)
+                                        .size(11.5)
+                                        .color(p.muted),
+                                );
+                                if !item.creator_name.is_empty() {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 4.0;
                                         ui.label(
-                                            RichText::new(format!("Type: {}", item.asset_type_name))
+                                            RichText::new(format!("By {}", item.creator_name))
                                                 .size(11.5)
                                                 .color(p.muted),
                                         );
-                                        if !item.creator_name.is_empty() {
-                                            ui.horizontal(|ui| {
-                                                ui.label(
-                                                    RichText::new(format!(
-                                                        "By {}",
-                                                        item.creator_name
-                                                    ))
-                                                    .size(11.5)
-                                                    .color(p.muted),
-                                                );
-                                                if item.creator_verified {
-                                                    verified_badge_tip(ui, 12.0, "Verified Creator");
-                                                }
-                                            });
-                                        }
-                                        if let Some(pr) = item.price {
-                                            ui.label(
-                                                RichText::new(format!("Price: â—Ž {} Robux", pr))
-                                                    .size(12.0)
-                                                    .color(GREEN)
-                                                    .strong(),
-                                            );
+                                        if item.creator_verified {
+                                            verified_badge_tip(ui, 11.0, "Verified Creator");
                                         }
                                     });
-
-                                    if card_resp.clicked() {
-                                        acts.push(Action::OpenUrl(format!(
-                                            "https://www.roblox.com/catalog/{}",
-                                            item.id
-                                        )));
-                                    }
+                                }
+                                if let Some(pr) = item.price {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 4.0;
+                                        let (ic_rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(12.0, 12.0),
+                                            Sense::hover(),
+                                        );
+                                        draw_robux_icon(
+                                            ui.painter(),
+                                            ic_rect.center(),
+                                            12.0,
+                                            rb_gold,
+                                        );
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{} Robux",
+                                                crate::api::format_commas(pr)
+                                            ))
+                                            .size(12.0),
+                                        );
+                                    });
+                                } else {
+                                    ui.label(RichText::new("Free").size(12.0).color(GREEN));
                                 }
                             });
-                        });
-                }
 
-                // 5. Currently Playing (if in game)
-                if let Some(game) = &profile.playing_game {
-                    ui.add_space(24.0);
-                    ui.label(RichText::new("Currently Playing").size(18.0).strong());
-                    ui.add_space(8.0);
-                    card_frame(ui, 14).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let t = thumb(
-                                ui,
-                                self.wide.get(&game.universe_id),
-                                egui::vec2(192.0, 108.0),
-                                8,
-                            );
-                            ui.add_space(12.0);
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new(&game.name).size(18.0).strong());
-                                ui.add_space(2.0);
-                                ui.label(
-                                    RichText::new(format!("By {}", game.creator))
-                                        .size(13.0)
-                                        .color(p.muted),
-                                );
-                                ui.add_space(8.0);
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "ðŸ‘¥ {} Playing",
-                                            compact(game.playing)
-                                        ))
-                                        .size(13.0)
-                                        .color(GREEN)
-                                        .strong(),
-                                    );
-                                    if let Some(pid) = profile.user.place_id {
-                                        ui.add_space(14.0);
-                                        let join_btn = egui::Button::new(
-                                            RichText::new("â–¶   Join Game")
-                                                .size(14.0)
-                                                .strong()
-                                                .color(Color32::WHITE),
-                                        )
-                                        .fill(GREEN)
-                                        .corner_radius(8);
-                                        if ui.add(join_btn).clicked() {
-                                            acts.push(Action::JoinPlace(pid));
-                                        }
-                                    }
-                                });
-                            });
-                            if t.clicked() {
-                                acts.push(Action::Open(game.clone()));
-                            }
-                        });
-                    });
-                }
-
-                // 6. Experiences / Creations
-                if !profile.experiences.is_empty() {
-                    ui.add_space(24.0);
-                    ui.label(RichText::new("Creations").size(18.0).strong());
-                    ui.add_space(8.0);
-                    let preview = self.current_card_preview();
-                    wide_grid_with_width(ui, &profile.experiences, &self.wide, preview, 220.0, acts);
-                }
-
-                ui.add_space(30.0);
+                        if resp.clicked() {
+                            acts.push(Action::OpenUrl(format!(
+                                "https://www.roblox.com/catalog/{}",
+                                item.id
+                            )));
+                        }
+                    }
+                });
+                ui.add_space(6.0);
             });
     }
 
@@ -659,60 +792,117 @@ impl RustBlox {
         if self.my_profile.is_none() && !self.my_profile_loading {
             self.ensure_my_profile_loaded();
         }
-        let p = pal(ui);
+
         let loading = self.my_profile_loading;
         let err = self.my_profile_err.clone();
         let profile = self.my_profile.clone();
 
-        if let Some(prof) = &profile {
+        if let Some(ref prof) = profile {
             self.render_profile_view(ui, prof, true, acts);
         } else if loading {
-            ui.add_space(40.0);
-            ui.horizontal(|ui| {
+            let p = pal(ui);
+            ui.vertical_centered(|ui| {
+                ui.add_space(80.0);
                 ui.spinner();
-                ui.label(RichText::new("Loading profile...").size(16.0).color(p.muted));
+                ui.add_space(10.0);
+                ui.label(RichText::new("Loading your profile...").size(14.0).color(p.muted));
             });
-        } else if let Some(e) = &err {
-            ui.add_space(20.0);
-            card_frame(ui, 16).show(ui, |ui| {
-                ui.colored_label(RED, format!("Could not load profile: {e}"));
-                ui.add_space(8.0);
-                if ui.button("Retry").clicked() {
+        } else if let Some(err) = err {
+            let p = pal(ui);
+            ui.vertical_centered(|ui| {
+                ui.add_space(80.0);
+                ui.label(RichText::new(&err).size(14.0).color(RED));
+                ui.add_space(10.0);
+                if ui
+                    .button(RichText::new("Retry").size(13.0).color(p.text))
+                    .clicked()
+                {
                     acts.push(Action::RefreshMyProfile);
                 }
             });
         } else {
-            ui.add_space(40.0);
-            ui.label(RichText::new("Please sign in to view your profile.").color(p.muted));
+            let p = pal(ui);
+            ui.vertical_centered(|ui| {
+                ui.add_space(80.0);
+                ui.label(RichText::new("No profile loaded.").size(14.0).color(p.muted));
+            });
         }
     }
 
     pub fn page_friend(&mut self, ui: &mut egui::Ui, u: &User, acts: &mut Vec<Action>) {
         let p = pal(ui);
-        ui.add_space(6.0);
-        if ui.button("â† Back").clicked() {
+        let back_btn = egui::Button::image_and_text(
+            egui::Image::new(egui::include_image!("../../assets/icon_arrow_left.png"))
+                .fit_to_exact_size(egui::vec2(14.0, 14.0))
+                .tint(p.text),
+            RichText::new("Back").size(13.0).color(p.text),
+        )
+        .fill(p.surface_bg)
+        .stroke(egui::Stroke::new(1.0, p.border))
+        .corner_radius(8);
+        if ui
+            .add(back_btn)
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
             acts.push(Action::Go(self.back.clone()));
         }
-        ui.add_space(8.0);
+        ui.add_space(10.0);
 
-        let fp = self.friend_profile.as_ref().filter(|fp| fp.user.id == u.id).cloned();
-        if let Some(prof) = &fp {
+        let fp = self
+            .friend_profile
+            .as_ref()
+            .filter(|fp| fp.user.id == u.id)
+            .cloned();
+        if let Some(ref prof) = fp {
             self.render_profile_view(ui, prof, false, acts);
         } else if self.friend_loading {
-            ui.add_space(30.0);
-            ui.horizontal(|ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(60.0);
                 ui.spinner();
+                ui.add_space(10.0);
                 ui.label(
-                    RichText::new(format!("Loading @{}'s profile...", u.name))
-                        .size(15.0)
+                    RichText::new(format!("Loading {}'s profile...", u.display))
+                        .size(14.0)
                         .color(p.muted),
                 );
             });
         } else if let Some(err) = &self.friend_err {
-            ui.colored_label(RED, format!("Could not load profile: {err}"));
-        } else {
-            ui.spinner();
+            ui.vertical_centered(|ui| {
+                ui.add_space(60.0);
+                ui.label(RichText::new(err).size(14.0).color(RED));
+            });
         }
     }
+}
 
+fn render_presence_pill(ui: &mut egui::Ui, profile: &FriendProfile) {
+    let p = pal(ui);
+    let (dot_color, label) = match profile.user.presence {
+        2 => (
+            GREEN,
+            if profile.user.location.is_empty() {
+                "In Game".to_string()
+            } else {
+                format!("In Game • {}", profile.user.location)
+            },
+        ),
+        3 => (ORANGE, "In Studio".to_string()),
+        1 => (BLUE, "Online".to_string()),
+        _ => (p.muted, "Offline".to_string()),
+    };
+
+    egui::Frame::new()
+        .fill(p.surface_bg)
+        .stroke(egui::Stroke::new(1.0, p.border))
+        .corner_radius(10)
+        .inner_margin(egui::Margin::symmetric(8, 3))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 5.0;
+                let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 12.0), Sense::hover());
+                ui.painter().circle_filled(dot_rect.center(), 3.8, dot_color);
+                ui.label(RichText::new(label).size(11.5).color(p.text));
+            });
+        });
 }

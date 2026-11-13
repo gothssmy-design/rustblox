@@ -1171,7 +1171,12 @@ pub fn build_profile(mut user: User) -> Profile {
     .ok()
     .map(|v| str_of(&v["data"][0]["imageUrl"]))
     .unwrap_or_default();
-    Profile { user, friends, avatar }
+    Profile {
+        user,
+        friends,
+        avatar,
+        robux: None,
+    }
 }
 
 pub fn fetch_user_currently_wearing(user_id: u64, cookie: Option<&str>) -> Vec<AvatarAsset> {
@@ -1339,6 +1344,21 @@ pub fn fetch_friend_profile(mut user: User, cookie: Option<String>) -> Result<Fr
     })
 }
 
+pub fn fetch_robux_balance(user_id: u64, cookie: &str) -> Option<u64> {
+    let urls = [
+        format!("https://economy.roblox.com/v1/users/{user_id}/currency"),
+        "https://economy.roblox.com/v1/user/currency".to_string(),
+    ];
+    for url in &urls {
+        if let Ok(v) = auth_get_json(url, Some(cookie)) {
+            if let Some(robux) = v["robux"].as_u64() {
+                return Some(robux);
+            }
+        }
+    }
+    None
+}
+
 pub fn fetch_authenticated_session(cookie: &str) -> Result<(Profile, Vec<User>), String> {
     let me_json = auth_get_json("https://users.roblox.com/v1/users/authenticated", Some(cookie))?;
     let id = me_json["id"]
@@ -1354,7 +1374,8 @@ pub fn fetch_authenticated_session(cookie: &str) -> Result<(Profile, Vec<User>),
         place_id: None,
         verified: me_json["hasVerifiedBadge"].as_bool().unwrap_or(false),
     };
-    let profile = build_profile(user);
+    let mut profile = build_profile(user);
+    profile.robux = fetch_robux_balance(id, cookie);
 
     let mut friends = match auth_get_json(
         &format!("https://friends.roblox.com/v1/users/{id}/friends"),

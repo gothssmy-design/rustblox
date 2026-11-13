@@ -183,6 +183,7 @@ pub struct Profile {
     pub user: User,
     pub friends: u64,
     pub avatar: String,
+    pub robux: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
