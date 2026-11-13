@@ -2,12 +2,12 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use serde_json::Value;
+use serde_json::{json, Value};
 use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Security::Cryptography::{
     CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
 };
-use crate::types::{BgMode, Settings, TextColorMode};
+use crate::types::{BgMode, Settings, TextColorMode, User};
 
 pub fn data_dir() -> PathBuf {
     let base = env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
@@ -208,4 +208,174 @@ pub fn clear_cookie() {
         }
     }
     let _ = fs::remove_file(path);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredAccount {
+    pub id: u64,
+    pub name: String,
+    pub display: String,
+    pub headshot: String,
+    pub verified: bool,
+    pub cookie: String,
+    pub last_used_ms: u64,
+}
+
+impl StoredAccount {
+    fn to_json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "name": self.name,
+            "display": self.display,
+            "headshot": self.headshot,
+            "verified": self.verified,
+            "cookie": self.cookie,
+            "last_used_ms": self.last_used_ms,
+        })
+    }
+
+    fn from_json(v: &Value) -> Option<Self> {
+        let id = v.get("id")?.as_u64()?;
+        let name = v.get("name")?.as_str()?.to_string();
+        let cookie = v.get("cookie")?.as_str()?.to_string();
+        if id == 0 || cookie.trim().is_empty() {
+            return None;
+        }
+        let display = v
+            .get("display")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(&name)
+            .to_string();
+        Some(Self {
+            id,
+            name,
+            display,
+            headshot: v
+                .get("headshot")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            verified: v.get("verified").and_then(|x| x.as_bool()).unwrap_or(false),
+            cookie,
+            last_used_ms: v.get("last_used_ms").and_then(|x| x.as_u64()).unwrap_or(0),
+        })
+    }
+}
+
+pub fn load_accounts() -> Vec<StoredAccount> {
+    let Ok(encrypted) = fs::read(data_dir().join("accounts.dat")) else {
+        return Vec::new();
+    };
+    let Some(decrypted) = dpapi_transform(&encrypted, false) else {
+        return Vec::new();
+    };
+    let Ok(text) = String::from_utf8(decrypted) else {
+        return Vec::new();
+    };
+    let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    arr.iter().filter_map(StoredAccount::from_json).collect()
+}
+
+pub fn save_accounts(accounts: &[StoredAccount]) -> Result<(), String> {
+    let path = data_dir().join("accounts.dat");
+    if accounts.is_empty() {
+        if let Ok(meta) = fs::metadata(&path) {
+            let len = usize::try_from(meta.len()).unwrap_or(0).min(1024 * 64);
+            if len > 0 {
+                let _ = fs::write(&path, vec![0u8; len]);
+            }
+        }
+        let _ = fs::remove_file(&path);
+        return Ok(());
+    }
+    let arr: Vec<Value> = accounts.iter().map(StoredAccount::to_json).collect();
+    let text = serde_json::to_string(&Value::Array(arr)).map_err(|e| e.to_string())?;
+    let encrypted = dpapi_transform(text.as_bytes(), true)
+        .ok_or_else(|| "Windows DPAPI encryption failed".to_string())?;
+    fs::write(path, encrypted).map_err(|e| e.to_string())
+}
+
+pub fn upsert_stored_account(
+    accounts: &mut Vec<StoredAccount>,
+    user: &User,
+    cookie: &str,
+    last_used_ms: u64,
+) {
+    if cookie.trim().is_empty() || user.id == 0 {
+        return;
+    }
+    let display = if user.display.trim().is_empty() {
+        user.name.clone()
+    } else {
+        user.display.clone()
+    };
+    if let Some(existing) = accounts
+        .iter_mut()
+        .find(|a| a.id == user.id || a.cookie == cookie)
+    {
+        existing.id = user.id;
+        existing.name = user.name.clone();
+        existing.display = display;
+        existing.headshot = user.headshot.clone();
+        existing.verified = user.verified;
+        existing.cookie = cookie.to_string();
+        existing.last_used_ms = last_used_ms;
+    } else {
+        accounts.push(StoredAccount {
+            id: user.id,
+            name: user.name.clone(),
+            display,
+            headshot: user.headshot.clone(),
+            verified: user.verified,
+            cookie: cookie.to_string(),
+            last_used_ms,
+        });
+    }
+}
+
+pub fn remove_stored_account(accounts: &mut Vec<StoredAccount>, user_id: u64) -> Option<StoredAccount> {
+    let pos = accounts.iter().position(|a| a.id == user_id)?;
+    Some(accounts.remove(pos))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_user(id: u64, name: &str) -> User {
+        User {
+            id,
+            name: name.to_string(),
+            display: format!("{name} Display"),
+            headshot: "https://example.com/a.png".to_string(),
+            verified: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn upsert_and_remove_accounts_behaves_cleanly() {
+        let mut vault = Vec::new();
+        let u1 = sample_user(101, "alice");
+        let u2 = sample_user(202, "bob");
+
+        upsert_stored_account(&mut vault, &u1, "cookie_1", 10);
+        upsert_stored_account(&mut vault, &u2, "cookie_2", 20);
+        assert_eq!(vault.len(), 2);
+
+        let mut u1_updated = u1.clone();
+        u1_updated.name = "alice_new".to_string();
+        upsert_stored_account(&mut vault, &u1_updated, "cookie_1_new", 30);
+        assert_eq!(vault.len(), 2);
+        assert_eq!(vault[0].name, "alice_new");
+        assert_eq!(vault[0].cookie, "cookie_1_new");
+
+        let removed = remove_stored_account(&mut vault, 101);
+        assert!(removed.is_some());
+        assert_eq!(vault.len(), 1);
+        assert_eq!(vault[0].id, 202);
+    }
 }

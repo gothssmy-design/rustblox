@@ -3,6 +3,10 @@ use std::sync::atomic::Ordering;
 use eframe::egui::{self, Color32, CornerRadius, RichText, Sense};
 use crate::app::RustBlox;
 use crate::auth::{data_dir, save_settings, write_ids};
+use crate::fastflags::{
+    export_effective_flags_json, format_flag_value, import_custom_flags_json, parse_flag_value,
+    save_fastflags, sync_client_fastflags, LightingMode, RendererMode,
+};
 use crate::roblox_process::{
     apply_fps_setting, close_tray_roblox_processes, find_player, handler_status, register, restore,
 };
@@ -11,6 +15,7 @@ use crate::theme::{
     BLUE, GREEN, ORANGE, RED,
 };
 use crate::types::{Action, BgMode, TextColorMode};
+use crate::ui::page_login::draw_login_marquee;
 use crate::ui::widgets::*;
 
 const COLOR_PRESETS: [([u8; 3], &str); 10] = [
@@ -177,52 +182,87 @@ impl RustBlox {
         ui.vertical(|ui| {
             ui.set_max_width(740.0);
 
-            // Account card
+            // Accounts card
             card_frame(ui, 18).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.label(RichText::new("Account").size(17.0).strong());
-                ui.add_space(6.0);
-                let mut do_sign_out = false;
-                let mut do_refresh_auth = false;
-                if self.cookie.is_some() {
-                    if let Some(prof) = &self.me {
-                        ui.label(format!("Signed in via Quick Login as @{}", prof.user.name));
-                    } else {
-                        ui.label("Signed in via Quick Login");
-                    }
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Refresh profile & friends").clicked() {
-                            do_refresh_auth = true;
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Accounts").size(17.0).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("+ Add account").clicked() {
+                            acts.push(Action::AddAccount);
                         }
-                        let signout_btn = egui::Button::new(
-                            RichText::new("Sign out").strong().color(Color32::WHITE),
-                        )
-                        .fill(RED);
-                        if ui.add(signout_btn).clicked() {
-                            do_sign_out = true;
+                        if self.cookie.is_some() {
+                            if ui.button("Sign out").clicked() {
+                                self.sign_out();
+                            }
+                            if ui.button("Refresh").clicked() {
+                                self.sync_auth_session(true);
+                                self.status = "Refreshing profile & friends...".to_string();
+                            }
                         }
                     });
-                } else {
+                });
+                ui.add_space(6.0);
+
+                if !self.saved_accounts.is_empty() {
+                    let active_id = self.me.as_ref().map(|m| m.user.id);
+                    let saved = self.saved_accounts.clone();
+                    for acc in &saved {
+                        let is_active = active_id == Some(acc.id)
+                            || self.cookie.as_deref() == Some(acc.cookie.as_str());
+                        egui::Frame::new()
+                            .fill(if is_active {
+                                p.selected_bg.gamma_multiply(0.35)
+                            } else {
+                                p.surface_bg
+                            })
+                            .stroke(egui::Stroke::new(1.0, p.border))
+                            .corner_radius(8)
+                            .inner_margin(egui::Margin::symmetric(10, 7))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let _ = thumb_styled(
+                                        ui,
+                                        Some(&acc.headshot),
+                                        egui::vec2(28.0, 28.0),
+                                        14,
+                                        true,
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.vertical(|ui| {
+                                        ui.spacing_mut().item_spacing.y = 0.0;
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new(&acc.display).size(13.0).strong());
+                                            if acc.verified {
+                                                verified_badge_tip(ui, 12.5, "Verified Account");
+                                            }
+                                            if is_active {
+                                                ui.label(RichText::new("• Active").size(11.5).color(GREEN));
+                                            }
+                                        });
+                                        small_text(ui, format!("@{}", acc.name));
+                                    });
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui.button(RichText::new("Remove").size(11.5).color(RED)).clicked() {
+                                                acts.push(Action::RemoveAccount(acc.id));
+                                            }
+                                            if !is_active && ui.button("Switch").clicked() {
+                                                acts.push(Action::SwitchAccount(acc.id));
+                                            }
+                                        },
+                                    );
+                                });
+                            });
+                        ui.add_space(5.0);
+                    }
+                } else if self.cookie.is_none() {
                     ui.label(RichText::new("Not signed in.").color(p.muted));
-                    ui.add_space(8.0);
-                    let btn = egui::Button::new(
-                        RichText::new("Sign in with Quick Login")
-                            .strong()
-                            .color(Color32::WHITE),
-                    )
-                    .fill(GREEN)
-                    .corner_radius(8);
-                    if ui.add(btn).clicked() {
+                    ui.add_space(6.0);
+                    if ui.button("Sign in with Quick Login").clicked() {
                         acts.push(Action::StartQuickLogin);
                     }
-                }
-                if do_refresh_auth {
-                    self.sync_auth_session(true);
-                    self.status = "Refreshing profile & friends...".to_string();
-                }
-                if do_sign_out {
-                    self.sign_out();
                 }
             });
 
@@ -327,10 +367,243 @@ impl RustBlox {
 
             ui.add_space(12.0);
 
+            // Built-in FastFlags card
+            self.settings_fastflags_card(ui);
+
+            ui.add_space(12.0);
+
             // Advanced collapsible section (Roblox Links + Data & Cache)
             self.settings_advanced_card(ui);
         });
         ui.add_space(20.0);
+    }
+
+    fn settings_fastflags_card(&mut self, ui: &mut egui::Ui) {
+        let p = pal(ui);
+
+        card_frame(ui, 18).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let mut changed = false;
+            let mut removed_keys: Vec<String> = Vec::new();
+
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("FastFlags").size(17.0).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Reset").clicked() {
+                        for k in self.fastflags.custom_flags.keys() {
+                            removed_keys.push(k.clone());
+                        }
+                        self.fastflags.reset_all();
+                        changed = true;
+                    }
+                    if ui.button("Quality").clicked() {
+                        self.fastflags.apply_quality_preset();
+                        changed = true;
+                    }
+                    if ui.button("Max FPS").clicked() {
+                        self.fastflags.apply_competitive_preset();
+                        changed = true;
+                    }
+                });
+            });
+            ui.add_space(8.0);
+
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Renderer:");
+                let prev_ren = self.fastflags.renderer;
+                egui::ComboBox::from_id_salt("ff_renderer")
+                    .selected_text(self.fastflags.renderer.label())
+                    .show_ui(ui, |ui| {
+                        for mode in RendererMode::ALL {
+                            ui.selectable_value(&mut self.fastflags.renderer, mode, mode.label());
+                        }
+                    });
+                if self.fastflags.renderer != prev_ren {
+                    changed = true;
+                }
+
+                ui.add_space(12.0);
+                ui.label("Lighting:");
+                let prev_light = self.fastflags.lighting;
+                egui::ComboBox::from_id_salt("ff_lighting")
+                    .selected_text(self.fastflags.lighting.label())
+                    .show_ui(ui, |ui| {
+                        for mode in LightingMode::ALL {
+                            ui.selectable_value(&mut self.fastflags.lighting, mode, mode.label());
+                        }
+                    });
+                if self.fastflags.lighting != prev_light {
+                    changed = true;
+                }
+            });
+
+            ui.add_space(8.0);
+            let prev = (
+                self.fastflags.disable_shadows,
+                self.fastflags.low_quality_textures,
+                self.fastflags.disable_post_fx,
+                self.fastflags.disable_grass,
+                self.fastflags.disable_telemetry,
+            );
+            ui.checkbox(&mut self.fastflags.disable_shadows, "Disable player & world shadows");
+            ui.checkbox(&mut self.fastflags.low_quality_textures, "Low texture quality");
+            ui.checkbox(&mut self.fastflags.disable_post_fx, "Disable post-processing (bloom/blur)");
+            ui.checkbox(&mut self.fastflags.disable_grass, "Disable 3D grass");
+            ui.checkbox(&mut self.fastflags.disable_telemetry, "Disable telemetry");
+            if prev
+                != (
+                    self.fastflags.disable_shadows,
+                    self.fastflags.low_quality_textures,
+                    self.fastflags.disable_post_fx,
+                    self.fastflags.disable_grass,
+                    self.fastflags.disable_telemetry,
+                )
+            {
+                changed = true;
+            }
+
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Custom Flags").size(14.0).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button(if self.ff_json_open { "Hide JSON" } else { "JSON" })
+                        .clicked()
+                    {
+                        self.ff_json_open = !self.ff_json_open;
+                        if self.ff_json_open && self.ff_json_buf.trim().is_empty() {
+                            self.ff_json_buf = export_effective_flags_json(
+                                &self.fastflags,
+                                self.settings.target_fps,
+                            );
+                        }
+                    }
+                });
+            });
+            ui.add_space(4.0);
+
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.ff_new_key)
+                        .hint_text("FFlag name")
+                        .desired_width(230.0),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.ff_new_val)
+                        .hint_text("Value")
+                        .desired_width(120.0),
+                );
+                if ui.button("Add").clicked() {
+                    let key = self.ff_new_key.trim().to_string();
+                    if key.is_empty() {
+                        self.ff_err = Some("Enter a FastFlag name.".to_string());
+                    } else {
+                        let val = if self.ff_new_val.trim().is_empty() {
+                            serde_json::Value::Bool(true)
+                        } else {
+                            parse_flag_value(&self.ff_new_val)
+                        };
+                        self.fastflags.custom_flags.insert(key, val);
+                        self.ff_new_key.clear();
+                        self.ff_new_val.clear();
+                        self.ff_err = None;
+                        changed = true;
+                    }
+                }
+            });
+
+            if !self.fastflags.custom_flags.is_empty() {
+                ui.add_space(6.0);
+                let entries: Vec<(String, serde_json::Value)> = self
+                    .fastflags
+                    .custom_flags
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                for (k, v) in entries {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&k).monospace().size(12.0));
+                        ui.label(RichText::new("=").color(p.muted));
+                        ui.label(RichText::new(format_flag_value(&v)).monospace().size(12.0).color(p.muted));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(RichText::new("Remove").size(11.0).color(RED)).clicked() {
+                                self.fastflags.custom_flags.remove(&k);
+                                removed_keys.push(k.clone());
+                                changed = true;
+                            }
+                        });
+                    });
+                }
+            }
+
+            if self.ff_json_open {
+                ui.add_space(6.0);
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.ff_json_buf)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_rows(6)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Import JSON").clicked() {
+                        match import_custom_flags_json(&self.ff_json_buf, &mut self.fastflags) {
+                            Ok(n) => {
+                                self.ff_err = None;
+                                self.status = format!("Imported {n} FastFlags.");
+                                changed = true;
+                            }
+                            Err(e) => self.ff_err = Some(e),
+                        }
+                    }
+                    if ui.button("Load Current").clicked() {
+                        self.ff_json_buf = export_effective_flags_json(
+                            &self.fastflags,
+                            self.settings.target_fps,
+                        );
+                        self.ff_err = None;
+                    }
+                    if ui.button("Copy").clicked() {
+                        ui.ctx().copy_text(export_effective_flags_json(
+                            &self.fastflags,
+                            self.settings.target_fps,
+                        ));
+                        self.status = "Copied FastFlags JSON.".to_string();
+                    }
+                });
+            }
+
+            if let Some(err) = &self.ff_err {
+                ui.add_space(4.0);
+                ui.colored_label(RED, err);
+            }
+
+            if changed {
+                if let Err(e) = save_fastflags(&self.fastflags) {
+                    self.ff_err = Some(format!("Failed saving fastflags.json: {e}"));
+                } else {
+                    self.player_path = find_player();
+                    let removed_refs: Vec<&str> =
+                        removed_keys.iter().map(String::as_str).collect();
+                    match sync_client_fastflags(
+                        &self.fastflags,
+                        self.settings.target_fps,
+                        &removed_refs,
+                    ) {
+                        Ok(()) => {
+                            self.ff_err = None;
+                            self.status = "FastFlags updated.".to_string();
+                        }
+                        Err(e) => {
+                            self.ff_err = Some(e);
+                        }
+                    }
+                }
+            }
+        });
     }
 
     fn settings_theme_card(&mut self, ui: &mut egui::Ui) {
@@ -413,6 +686,9 @@ impl RustBlox {
             }
 
             ui.add_space(4.0);
+            self.settings_theme_showcase(ui, p, accent);
+
+            ui.add_space(10.0);
             ui.separator();
             ui.add_space(10.0);
 
@@ -1039,6 +1315,518 @@ impl RustBlox {
                 small_text(ui, format!("Saved in {}", data_dir().display()));
             }
         });
+    }
+
+    fn settings_theme_showcase(&self, ui: &mut egui::Ui, p: Palette, accent: Color32) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Live Preview").size(13.5).strong());
+            ui.label(
+                RichText::new("Home, Profile & Login update live as you customize")
+                    .size(11.5)
+                    .color(p.muted),
+            );
+        });
+        ui.add_space(8.0);
+
+        let avail_w = ui.available_width();
+        let gap = 10.0_f32;
+        let cols = if avail_w >= 540.0 { 3 } else { 1 };
+        let card_w = ((avail_w - gap * (cols as f32 - 1.0)) / cols as f32).max(160.0);
+        let preview_h = 132.0_f32;
+        let dark = effective_dark_mode(&self.settings);
+        let t = ui.input(|i| i.time as f32);
+        ui.ctx().request_repaint();
+
+        let paint_base = |ui: &mut egui::Ui, rect: egui::Rect| {
+            let painter = ui.painter();
+            painter.rect_filled(rect, CornerRadius::same(10), p.bg);
+            if self.settings.bg_mode == BgMode::Wallpaper {
+                if let Some((_, tex)) = &self.wallpaper_tex {
+                    let mut clipped = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                    clipped.set_clip_rect(rect.intersect(ui.clip_rect()));
+                    egui::Image::new(tex)
+                        .corner_radius(CornerRadius::same(10))
+                        .paint_at(&clipped, rect);
+                    let overlay_col = if dark {
+                        Color32::from_black_alpha((self.settings.bg_overlay * 255.0).round() as u8)
+                    } else {
+                        Color32::from_white_alpha((self.settings.bg_overlay * 255.0).round() as u8)
+                    };
+                    clipped
+                        .painter()
+                        .rect_filled(rect, CornerRadius::same(10), overlay_col);
+                }
+            }
+        };
+
+        let draw_home = |ui: &mut egui::Ui, w: f32| {
+            ui.vertical(|ui| {
+                ui.set_width(w);
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(w, preview_h),
+                    egui::Sense::hover(),
+                );
+                paint_base(ui, rect);
+                let painter = ui.painter_at(rect);
+
+                // Top bar
+                let top_h = 20.0;
+                let top_rect = egui::Rect::from_min_max(
+                    rect.min,
+                    egui::pos2(rect.right(), rect.top() + top_h),
+                );
+                painter.rect_filled(top_rect, CornerRadius { nw: 10, ne: 10, sw: 0, se: 0 }, p.card_bg);
+                painter.line_segment(
+                    [top_rect.left_bottom(), top_rect.right_bottom()],
+                    egui::Stroke::new(1.0, p.border),
+                );
+                // Search pill (text_border)
+                let search_rect = egui::Rect::from_min_size(
+                    egui::pos2(rect.left() + 48.0, rect.top() + 4.5),
+                    egui::vec2((w - 86.0).max(36.0), 11.0),
+                );
+                painter.rect_filled(search_rect, CornerRadius::same(5), p.surface_bg);
+                painter.rect_stroke(
+                    search_rect,
+                    CornerRadius::same(5),
+                    egui::Stroke::new(1.0, p.text_border),
+                    egui::StrokeKind::Inside,
+                );
+                painter.circle_filled(
+                    egui::pos2(rect.right() - 12.0, top_rect.center().y),
+                    5.0,
+                    accent,
+                );
+
+                // Left sidebar
+                let side_w = 38.0;
+                let side_rect = egui::Rect::from_min_max(
+                    egui::pos2(rect.left(), top_rect.bottom()),
+                    egui::pos2(rect.left() + side_w, rect.bottom()),
+                );
+                painter.rect_filled(side_rect, CornerRadius { nw: 0, ne: 0, sw: 10, se: 0 }, p.card_bg);
+                painter.line_segment(
+                    [side_rect.right_top(), side_rect.right_bottom()],
+                    egui::Stroke::new(1.0, p.border),
+                );
+                for idx in 0..4 {
+                    let y = side_rect.top() + 8.0 + idx as f32 * 15.0;
+                    let pill = egui::Rect::from_min_size(
+                        egui::pos2(side_rect.left() + 5.0, y),
+                        egui::vec2(side_w - 5.0, 10.0),
+                    );
+                    if idx == 0 {
+                        painter.rect_filled(
+                            pill,
+                            CornerRadius { nw: 4, sw: 4, ne: 0, se: 0 },
+                            accent.gamma_multiply(0.26),
+                        );
+                        painter.rect_filled(
+                            egui::Rect::from_min_size(
+                                egui::pos2(pill.right() - 2.5, pill.top()),
+                                egui::vec2(2.5, pill.height()),
+                            ),
+                            CornerRadius::ZERO,
+                            accent,
+                        );
+                    } else {
+                        painter.rect_filled(
+                            pill.shrink2(egui::vec2(2.0, 2.0)),
+                            CornerRadius::same(3),
+                            p.muted.gamma_multiply(0.28),
+                        );
+                    }
+                }
+
+                // Body: Friends row + Game cards
+                let bx = side_rect.right() + 10.0;
+                let by = top_rect.bottom() + 8.0;
+                painter.rect_filled(
+                    egui::Rect::from_min_size(egui::pos2(bx, by), egui::vec2(36.0, 5.0)),
+                    CornerRadius::same(2),
+                    p.text.gamma_multiply(0.85),
+                );
+                for f in 0..3 {
+                    let fc = egui::Rect::from_min_size(
+                        egui::pos2(bx + f as f32 * 30.0, by + 9.0),
+                        egui::vec2(24.0, 26.0),
+                    );
+                    if fc.right() < rect.right() - 6.0 {
+                        painter.rect_filled(fc, CornerRadius::same(5), p.friends_card_bg);
+                        painter.rect_stroke(
+                            fc,
+                            CornerRadius::same(5),
+                            egui::Stroke::new(1.1, p.friends_border),
+                            egui::StrokeKind::Inside,
+                        );
+                        painter.circle_filled(
+                            egui::pos2(fc.center().x, fc.top() + 10.0),
+                            5.5,
+                            p.muted.gamma_multiply(0.45),
+                        );
+                        painter.circle_filled(
+                            egui::pos2(fc.right() - 5.0, fc.top() + 5.0),
+                            2.5,
+                            GREEN,
+                        );
+                    }
+                }
+
+                let gy = by + 43.0;
+                painter.rect_filled(
+                    egui::Rect::from_min_size(egui::pos2(bx, gy), egui::vec2(44.0, 5.0)),
+                    CornerRadius::same(2),
+                    p.text.gamma_multiply(0.85),
+                );
+                let gcard_w = ((rect.right() - 10.0 - bx - 8.0) / 2.0).max(40.0);
+                for g in 0..2 {
+                    let gc = egui::Rect::from_min_size(
+                        egui::pos2(bx + g as f32 * (gcard_w + 8.0), gy + 9.0),
+                        egui::vec2(gcard_w, 46.0),
+                    );
+                    painter.rect_filled(gc, CornerRadius::same(6), p.card_bg);
+                    painter.rect_stroke(
+                        gc,
+                        CornerRadius::same(6),
+                        egui::Stroke::new(1.1, p.games_border),
+                        egui::StrokeKind::Inside,
+                    );
+                    let thumb = egui::Rect::from_min_max(
+                        gc.min,
+                        egui::pos2(gc.right(), gc.top() + 26.0),
+                    );
+                    let tcol = if g == 0 { BLUE } else { accent };
+                    painter.rect_filled(
+                        thumb,
+                        CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 },
+                        tcol.gamma_multiply(0.55),
+                    );
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(
+                            egui::pos2(gc.left() + 5.0, thumb.bottom() + 5.0),
+                            egui::vec2((gcard_w - 14.0).max(16.0), 4.0),
+                        ),
+                        CornerRadius::same(2),
+                        p.text.gamma_multiply(0.85),
+                    );
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(
+                            egui::pos2(gc.left() + 5.0, thumb.bottom() + 12.0),
+                            egui::vec2((gcard_w * 0.55).max(12.0), 3.0),
+                        ),
+                        CornerRadius::same(2),
+                        p.muted.gamma_multiply(0.7),
+                    );
+                }
+
+                // Outer border
+                painter.rect_stroke(
+                    rect,
+                    CornerRadius::same(10),
+                    egui::Stroke::new(1.2, p.border),
+                    egui::StrokeKind::Inside,
+                );
+                ui.add_space(4.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(RichText::new("Home").size(12.0).strong().color(p.muted));
+                });
+            });
+        };
+
+        let draw_profile = |ui: &mut egui::Ui, w: f32| {
+            ui.vertical(|ui| {
+                ui.set_width(w);
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(w, preview_h),
+                    egui::Sense::hover(),
+                );
+                paint_base(ui, rect);
+                let painter = ui.painter_at(rect);
+
+                // Top bar
+                let top_h = 20.0;
+                let top_rect = egui::Rect::from_min_max(
+                    rect.min,
+                    egui::pos2(rect.right(), rect.top() + top_h),
+                );
+                painter.rect_filled(top_rect, CornerRadius { nw: 10, ne: 10, sw: 0, se: 0 }, p.card_bg);
+                painter.line_segment(
+                    [top_rect.left_bottom(), top_rect.right_bottom()],
+                    egui::Stroke::new(1.0, p.border),
+                );
+
+                // Left sidebar
+                let side_w = 38.0;
+                let side_rect = egui::Rect::from_min_max(
+                    egui::pos2(rect.left(), top_rect.bottom()),
+                    egui::pos2(rect.left() + side_w, rect.bottom()),
+                );
+                painter.rect_filled(side_rect, CornerRadius { nw: 0, ne: 0, sw: 10, se: 0 }, p.card_bg);
+                painter.line_segment(
+                    [side_rect.right_top(), side_rect.right_bottom()],
+                    egui::Stroke::new(1.0, p.border),
+                );
+                for idx in 0..4 {
+                    let y = side_rect.top() + 8.0 + idx as f32 * 15.0;
+                    let pill = egui::Rect::from_min_size(
+                        egui::pos2(side_rect.left() + 5.0, y),
+                        egui::vec2(side_w - 5.0, 10.0),
+                    );
+                    if idx == 2 {
+                        painter.rect_filled(
+                            pill,
+                            CornerRadius { nw: 4, sw: 4, ne: 0, se: 0 },
+                            accent.gamma_multiply(0.26),
+                        );
+                        painter.rect_filled(
+                            egui::Rect::from_min_size(
+                                egui::pos2(pill.right() - 2.5, pill.top()),
+                                egui::vec2(2.5, pill.height()),
+                            ),
+                            CornerRadius::ZERO,
+                            accent,
+                        );
+                    } else {
+                        painter.rect_filled(
+                            pill.shrink2(egui::vec2(2.0, 2.0)),
+                            CornerRadius::same(3),
+                            p.muted.gamma_multiply(0.28),
+                        );
+                    }
+                }
+
+                // Profile Header Card (profile_card_bg + profile_border)
+                let bx = side_rect.right() + 10.0;
+                let bw = (rect.right() - 10.0 - bx).max(60.0);
+                let prof_card = egui::Rect::from_min_size(
+                    egui::pos2(bx, top_rect.bottom() + 8.0),
+                    egui::vec2(bw, 44.0),
+                );
+                painter.rect_filled(prof_card, CornerRadius::same(7), p.profile_card_bg);
+                painter.rect_stroke(
+                    prof_card,
+                    CornerRadius::same(7),
+                    egui::Stroke::new(1.1, p.profile_border),
+                    egui::StrokeKind::Inside,
+                );
+                // Round avatar inside profile
+                let av_center = egui::pos2(prof_card.left() + 20.0, prof_card.center().y);
+                painter.circle_filled(av_center, 13.0, p.surface_bg);
+                painter.circle_stroke(av_center, 13.0, egui::Stroke::new(1.2, p.profile_border));
+                painter.circle_filled(av_center, 5.5, p.muted.gamma_multiply(0.55));
+                // Name + @handle + verified dot
+                painter.rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(prof_card.left() + 40.0, prof_card.top() + 12.0),
+                        egui::vec2((bw * 0.45).max(28.0), 5.5),
+                    ),
+                    CornerRadius::same(2),
+                    p.text.gamma_multiply(0.9),
+                );
+                painter.circle_filled(
+                    egui::pos2(
+                        prof_card.left() + 44.0 + (bw * 0.45).max(28.0),
+                        prof_card.top() + 14.5,
+                    ),
+                    3.0,
+                    BLUE,
+                );
+                painter.rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(prof_card.left() + 40.0, prof_card.top() + 22.0),
+                        egui::vec2((bw * 0.30).max(20.0), 3.5),
+                    ),
+                    CornerRadius::same(2),
+                    p.muted.gamma_multiply(0.75),
+                );
+
+                // Bio / About card (text_border)
+                let bio_card = egui::Rect::from_min_size(
+                    egui::pos2(bx, prof_card.bottom() + 7.0),
+                    egui::vec2(bw, 26.0),
+                );
+                painter.rect_filled(bio_card, CornerRadius::same(6), p.surface_bg);
+                painter.rect_stroke(
+                    bio_card,
+                    CornerRadius::same(6),
+                    egui::Stroke::new(1.1, p.text_border),
+                    egui::StrokeKind::Inside,
+                );
+                painter.rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(bio_card.left() + 7.0, bio_card.top() + 7.0),
+                        egui::vec2((bw - 24.0).max(20.0), 3.5),
+                    ),
+                    CornerRadius::same(2),
+                    p.text.gamma_multiply(0.75),
+                );
+                painter.rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(bio_card.left() + 7.0, bio_card.top() + 14.0),
+                        egui::vec2((bw * 0.55).max(16.0), 3.5),
+                    ),
+                    CornerRadius::same(2),
+                    p.muted.gamma_multiply(0.65),
+                );
+
+                // Favorite / Badge chips (games_border)
+                let chip_y = bio_card.bottom() + 7.0;
+                let chip_w = ((bw - 8.0) / 2.0).max(26.0);
+                for c in 0..2 {
+                    let chip = egui::Rect::from_min_size(
+                        egui::pos2(bx + c as f32 * (chip_w + 8.0), chip_y),
+                        egui::vec2(chip_w, 16.0),
+                    );
+                    painter.rect_filled(chip, CornerRadius::same(5), p.card_bg);
+                    painter.rect_stroke(
+                        chip,
+                        CornerRadius::same(5),
+                        egui::Stroke::new(1.0, p.games_border),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+
+                painter.rect_stroke(
+                    rect,
+                    CornerRadius::same(10),
+                    egui::Stroke::new(1.2, p.border),
+                    egui::StrokeKind::Inside,
+                );
+                ui.add_space(4.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(RichText::new("Profile").size(12.0).strong().color(p.muted));
+                });
+            });
+        };
+
+        let draw_login = |ui: &mut egui::Ui, w: f32| {
+            ui.vertical(|ui| {
+                ui.set_width(w);
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(w, preview_h),
+                    egui::Sense::hover(),
+                );
+                let painter = ui.painter();
+                let login_bg = if dark {
+                    Color32::from_rgb(17, 19, 25)
+                } else {
+                    Color32::from_rgb(245, 246, 250)
+                };
+                painter.rect_filled(rect, CornerRadius::same(10), login_bg);
+
+                // Real live miniature sideways-scrolling Ferris & Roblox backdrop!
+                draw_login_marquee(ui, rect, t, dark, 0.36);
+
+                // Mini centered Login card
+                let card_rect = egui::Rect::from_center_size(
+                    rect.center(),
+                    egui::vec2((w * 0.60).clamp(96.0, 146.0), 88.0),
+                );
+                let card_bg = if dark {
+                    Color32::from_rgba_unmultiplied(21, 25, 34, 242)
+                } else {
+                    Color32::from_rgba_unmultiplied(255, 253, 250, 245)
+                };
+                let card_border = if dark {
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 26)
+                } else {
+                    Color32::from_rgba_unmultiplied(255, 130, 72, 70)
+                };
+                let painter = ui.painter_at(rect);
+                painter.rect_filled(
+                    card_rect.translate(egui::vec2(0.0, 3.0)),
+                    CornerRadius::same(9),
+                    Color32::from_black_alpha(if dark { 80 } else { 28 }),
+                );
+                painter.rect_filled(card_rect, CornerRadius::same(9), card_bg);
+                painter.rect_stroke(
+                    card_rect,
+                    CornerRadius::same(9),
+                    egui::Stroke::new(1.0, card_border),
+                    egui::StrokeKind::Inside,
+                );
+
+                // Mini static logo
+                let logo_rect = egui::Rect::from_center_size(
+                    egui::pos2(card_rect.center().x, card_rect.top() + 14.0),
+                    egui::vec2(14.0, 14.0),
+                );
+                egui::Image::new(egui::include_image!("../../assets/logo.png"))
+                    .paint_at(ui, logo_rect);
+
+                // Mini title + subtitle bars
+                painter.rect_filled(
+                    egui::Rect::from_center_size(
+                        egui::pos2(card_rect.center().x, card_rect.top() + 27.0),
+                        egui::vec2(46.0, 4.5),
+                    ),
+                    CornerRadius::same(2),
+                    p.text.gamma_multiply(0.88),
+                );
+                painter.rect_filled(
+                    egui::Rect::from_center_size(
+                        egui::pos2(card_rect.center().x, card_rect.top() + 35.0),
+                        egui::vec2(64.0, 3.0),
+                    ),
+                    CornerRadius::same(1),
+                    p.muted.gamma_multiply(0.7),
+                );
+
+                // Mini white QR square hint + tactile orange button
+                let qr_mini = egui::Rect::from_center_size(
+                    egui::pos2(card_rect.center().x, card_rect.top() + 52.0),
+                    egui::vec2(18.0, 18.0),
+                );
+                painter.rect_filled(qr_mini, CornerRadius::same(3), Color32::WHITE);
+                painter.rect_filled(
+                    qr_mini.shrink(4.0),
+                    CornerRadius::same(1),
+                    Color32::from_rgb(28, 32, 40),
+                );
+
+                let btn_rect = egui::Rect::from_center_size(
+                    egui::pos2(card_rect.center().x, card_rect.bottom() - 14.0),
+                    egui::vec2(card_rect.width() - 28.0, 14.0),
+                );
+                painter.rect_filled(
+                    btn_rect.translate(egui::vec2(0.0, 2.0)),
+                    CornerRadius::same(4),
+                    Color32::from_rgb(168, 70, 28),
+                );
+                painter.rect_filled(
+                    btn_rect,
+                    CornerRadius::same(4),
+                    Color32::from_rgb(255, 107, 43),
+                );
+
+                painter.rect_stroke(
+                    rect,
+                    CornerRadius::same(10),
+                    egui::Stroke::new(1.2, p.border),
+                    egui::StrokeKind::Inside,
+                );
+                ui.add_space(4.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(RichText::new("Login").size(12.0).strong().color(p.muted));
+                });
+            });
+        };
+
+        if cols == 3 {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                draw_home(ui, card_w);
+                draw_profile(ui, card_w);
+                draw_login(ui, card_w);
+            });
+        } else {
+            draw_home(ui, card_w);
+            ui.add_space(8.0);
+            draw_profile(ui, card_w);
+            ui.add_space(8.0);
+            draw_login(ui, card_w);
+        }
     }
 }
 

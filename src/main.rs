@@ -4,6 +4,7 @@ mod api;
 mod app;
 mod auth;
 mod avatar_3d;
+mod fastflags;
 mod roblox_process;
 mod telemetry;
 mod theme;

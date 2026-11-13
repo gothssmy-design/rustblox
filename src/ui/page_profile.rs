@@ -1,7 +1,6 @@
 ﻿use eframe::egui::{self, Color32, CornerRadius, RichText, Sense};
 
 use crate::app::RustBlox;
-use crate::avatar_3d::render_avatar_viewport;
 use crate::theme::{
     accent_color, card_frame_colored, compact, pal, BLUE, GREEN, ORANGE, RED,
 };
@@ -29,6 +28,10 @@ impl RustBlox {
                 }
 
                 self.render_profile_wearing_section(ui, profile, acts);
+                ui.add_space(18.0);
+                self.render_profile_favorites_section(ui, profile, acts);
+                ui.add_space(18.0);
+                self.render_profile_badges_section(ui, profile, acts);
 
                 if !profile.experiences.is_empty() {
                     ui.add_space(18.0);
@@ -65,7 +68,7 @@ impl RustBlox {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 22.0;
 
-                self.render_profile_avatar_box(ui, profile, is_self);
+                self.render_profile_avatar_box(ui, profile);
 
                 ui.vertical(|ui| {
                     ui.set_width(ui.available_width());
@@ -170,43 +173,27 @@ impl RustBlox {
         });
     }
 
-    fn render_profile_avatar_box(
-        &mut self,
-        ui: &mut egui::Ui,
-        profile: &FriendProfile,
-        is_self: bool,
-    ) {
+    fn render_profile_avatar_box(&mut self, ui: &mut egui::Ui, profile: &FriendProfile) {
         let p = pal(ui);
-        let box_size = egui::vec2(174.0, 214.0);
+        let box_size = egui::vec2(156.0, 156.0);
         let (outer_rect, _) = ui.allocate_exact_size(box_size, Sense::hover());
+        let center = outer_rect.center();
+        let outer_radius = box_size.x * 0.5;
 
-        ui.painter().rect(
-            outer_rect,
-            CornerRadius::same(14),
-            p.surface_bg,
-            egui::Stroke::new(1.0, p.profile_border),
-            egui::StrokeKind::Inside,
-        );
+        ui.painter().circle_filled(center, outer_radius, p.surface_bg);
 
-        let inner_rect = outer_rect.shrink(3.0);
-        let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(inner_rect));
+        let img_url = if !profile.user.headshot.is_empty() {
+            profile.user.headshot.as_str()
+        } else {
+            profile.avatar.as_str()
+        };
 
-        if is_self && self.profile_3d_mode {
-            render_avatar_viewport(
-                &mut child_ui,
-                &mut self.avatar_3d,
-                (!profile.avatar.is_empty()).then_some(profile.avatar.as_str()),
-                inner_rect.size(),
-                self.settings.dark,
-            );
-        } else if !profile.avatar.is_empty() {
-            child_ui.centered_and_justified(|ui| {
-                ui.add(
-                    egui::Image::new(&profile.avatar)
-                        .fit_to_exact_size(inner_rect.size())
-                        .corner_radius(11),
-                );
-            });
+        let inner_size = egui::vec2(148.0, 148.0);
+        let inner_rect = egui::Rect::from_center_size(center, inner_size);
+        if !img_url.is_empty() {
+            egui::Image::new(img_url)
+                .corner_radius(74)
+                .paint_at(ui, inner_rect);
         } else {
             let initial = profile
                 .user
@@ -215,8 +202,8 @@ impl RustBlox {
                 .next()
                 .unwrap_or('?')
                 .to_string();
-            child_ui.painter().text(
-                inner_rect.center(),
+            ui.painter().text(
+                center,
                 egui::Align2::CENTER_CENTER,
                 initial,
                 egui::FontId::proportional(42.0),
@@ -224,33 +211,22 @@ impl RustBlox {
             );
         }
 
-        if is_self {
-            let toggle_rect = egui::Rect::from_min_size(
-                egui::pos2(outer_rect.right() - 44.0, outer_rect.top() + 8.0),
-                egui::vec2(36.0, 22.0),
-            );
-            let mut overlay = ui.new_child(egui::UiBuilder::new().max_rect(toggle_rect));
-            let label = if self.profile_3d_mode { "2D" } else { "3D" };
-            let tip = if self.profile_3d_mode {
-                "Switch to 2D avatar image"
-            } else {
-                "Switch to interactive 3D avatar"
-            };
-            let btn = egui::Button::new(RichText::new(label).size(11.0).strong().color(p.text))
-                .fill(p.profile_card_bg)
-                .stroke(egui::Stroke::new(1.0, p.profile_border))
-                .corner_radius(11);
-            if overlay
-                .add_sized(toggle_rect.size(), btn)
-                .on_hover_text(tip)
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .clicked()
-            {
-                self.profile_3d_mode = !self.profile_3d_mode;
-                if self.profile_3d_mode && self.avatar_3d.model.is_none() {
-                    self.load_avatar_3d();
-                }
-            }
+        ui.painter().circle_stroke(
+            center,
+            outer_radius - 1.0,
+            egui::Stroke::new(2.0, p.profile_border),
+        );
+
+        let dot_color = match profile.user.presence {
+            1 => Some(BLUE),
+            2 => Some(GREEN),
+            3 => Some(ORANGE),
+            _ => None,
+        };
+        if let Some(c) = dot_color {
+            let dot_pos = center + egui::vec2(52.0, 52.0);
+            ui.painter().circle_filled(dot_pos, 11.5, p.profile_card_bg);
+            ui.painter().circle_filled(dot_pos, 8.0, c);
         }
     }
 
@@ -794,6 +770,166 @@ impl RustBlox {
                             acts.push(Action::OpenUrl(format!(
                                 "https://www.roblox.com/catalog/{}",
                                 item.id
+                            )));
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+            });
+    }
+
+    fn render_profile_section_header(ui: &mut egui::Ui, title: &str, count: usize) {
+        let p = pal(ui);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.label(RichText::new(title).size(16.5).strong());
+            if count > 0 {
+                ui.label(RichText::new(format!("{count}")).size(12.5).color(p.muted));
+            }
+        });
+        ui.add_space(8.0);
+    }
+
+    fn render_profile_favorites_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        profile: &FriendProfile,
+        acts: &mut Vec<Action>,
+    ) {
+        let p = pal(ui);
+        Self::render_profile_section_header(ui, "Favorites", profile.favorites.len());
+
+        if profile.favorites.is_empty() {
+            card_frame_colored(16, p.profile_card_bg, p.profile_border).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new("No public favorite experiences visible.")
+                        .size(13.0)
+                        .color(p.muted),
+                );
+            });
+            return;
+        }
+
+        let preview = self.current_card_preview();
+        wide_grid_with_width(ui, &profile.favorites, &self.wide, preview, 220.0, acts);
+    }
+
+    fn render_profile_badges_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        profile: &FriendProfile,
+        acts: &mut Vec<Action>,
+    ) {
+        let p = pal(ui);
+        Self::render_profile_section_header(ui, "Badges", profile.badges.len());
+
+        if profile.badges.is_empty() {
+            card_frame_colored(16, p.profile_card_bg, p.profile_border).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new("No public badges visible.")
+                        .size(13.0)
+                        .color(p.muted),
+                );
+            });
+            return;
+        }
+
+        egui::ScrollArea::horizontal()
+            .id_salt(("badges_scroll", profile.user.id))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    for badge in &profile.badges {
+                        let card_size = egui::vec2(134.0, 168.0);
+                        let (card_rect, resp) = ui.allocate_exact_size(card_size, Sense::click());
+                        let hovered = resp.hovered();
+
+                        let border_color = if hovered {
+                            accent_color(ui)
+                        } else {
+                            p.profile_border
+                        };
+                        ui.painter().rect(
+                            card_rect,
+                            CornerRadius::same(12),
+                            p.profile_card_bg,
+                            egui::Stroke::new(if hovered { 1.5 } else { 1.0 }, border_color),
+                            egui::StrokeKind::Inside,
+                        );
+
+                        let icon_center = egui::pos2(card_rect.center().x, card_rect.top() + 58.0);
+                        ui.painter().circle_filled(icon_center, 46.0, p.surface_bg);
+                        if !badge.icon.is_empty() {
+                            let icon_rect =
+                                egui::Rect::from_center_size(icon_center, egui::vec2(86.0, 86.0));
+                            egui::Image::new(&badge.icon)
+                                .corner_radius(43)
+                                .paint_at(ui, icon_rect);
+                        }
+                        ui.painter().circle_stroke(
+                            icon_center,
+                            46.0,
+                            egui::Stroke::new(1.0, p.profile_border),
+                        );
+
+                        let body_rect = egui::Rect::from_min_max(
+                            egui::pos2(card_rect.left() + 10.0, card_rect.top() + 114.0),
+                            egui::pos2(card_rect.right() - 10.0, card_rect.bottom() - 8.0),
+                        );
+                        let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body_rect));
+                        body_ui.set_width(body_rect.width());
+                        body_ui.spacing_mut().item_spacing.y = 3.0;
+
+                        body_ui.vertical_centered(|ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&badge.name)
+                                        .size(12.5)
+                                        .strong()
+                                        .color(p.text),
+                                )
+                                .truncate(),
+                            );
+                            let sub = if !badge.awarded_date.is_empty() {
+                                badge.awarded_date.clone()
+                            } else {
+                                "Badge".to_string()
+                            };
+                            ui.label(RichText::new(sub).size(11.0).color(p.muted));
+                        });
+
+                        let resp = resp
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_ui(|ui| {
+                                ui.set_max_width(240.0);
+                                ui.label(RichText::new(&badge.name).size(13.0).strong());
+                                if !badge.description.is_empty() {
+                                    ui.add_space(2.0);
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&badge.description)
+                                                .size(11.5)
+                                                .color(p.muted),
+                                        )
+                                        .wrap(),
+                                    );
+                                }
+                                if !badge.awarded_date.is_empty() {
+                                    ui.add_space(3.0);
+                                    ui.label(
+                                        RichText::new(format!("Earned {}", badge.awarded_date))
+                                            .size(11.0)
+                                            .color(p.muted),
+                                    );
+                                }
+                            });
+
+                        if resp.clicked() {
+                            acts.push(Action::OpenUrl(format!(
+                                "https://www.roblox.com/badges/{}",
+                                badge.id
                             )));
                         }
                     }

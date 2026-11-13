@@ -1,6 +1,6 @@
 ﻿use std::collections::HashMap;
 use eframe::egui::{self, Color32, CornerRadius, Sense, Vec2, RichText};
-use crate::theme::{compact, pal, BLUE, GREEN, ORANGE};
+use crate::theme::{accent_color, compact, lerp_color, pal, BLUE, GREEN, ORANGE};
 use crate::types::{Action, CardPreview, Game};
 
 pub fn avatar_glass_frame(ui: &egui::Ui, pad: i8) -> egui::Frame {
@@ -276,6 +276,7 @@ pub fn game_card(
 ) {
     let w = thumb_size.x;
     let card_h = thumb_size.y + 58.0;
+    let hover_id = ui.scope_id().with(("game_card_hover", g.universe_id));
     let card_resp = ui.allocate_ui_with_layout(
         egui::vec2(w, card_h),
         egui::Layout::top_down(egui::Align::Min),
@@ -292,10 +293,20 @@ pub fn game_card(
 
             let a = thumb_styled_with_video(ui, thumb_url, video_tex, is_loading, thumb_size, 8, false);
             let gp = pal(ui);
+            let prev_hover = ui.ctx().data(|d| d.get_temp::<bool>(hover_id)).unwrap_or(false);
+            let hover_t = ui.ctx().animate_bool(hover_id.with("anim"), prev_hover);
+            let border_col = lerp_color(gp.games_border, accent_color(ui), hover_t * 0.75);
+            if hover_t > 0.01 {
+                ui.painter().rect_filled(
+                    a.rect,
+                    CornerRadius::same(8),
+                    Color32::from_white_alpha((hover_t * 14.0).round() as u8),
+                );
+            }
             ui.painter().rect_stroke(
                 a.rect,
                 CornerRadius::same(8),
-                egui::Stroke::new(1.2, gp.games_border),
+                egui::Stroke::new(1.2 + hover_t * 0.9, border_col),
                 egui::StrokeKind::Inside,
             );
             ui.add_space(3.0);
@@ -332,6 +343,9 @@ pub fn game_card(
     let pointer_in_card = ui.rect_contains_pointer(card_rect);
     let is_hovered = pointer_in_card || card_resp.inner.0 || card_resp.response.hovered();
     let is_clicked = card_resp.inner.1 || (pointer_in_card && ui.input(|i| i.pointer.primary_clicked()));
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(hover_id, is_hovered);
+    });
 
     if is_hovered {
         acts.push(Action::HoverGame(g.universe_id));
@@ -490,14 +504,26 @@ pub fn bubble(
             ui.set_width(108.0);
             ui.spacing_mut().item_spacing.y = 3.0;
             let r = thumb_styled(ui, url, egui::vec2(96.0, 96.0), 48, false);
+            let hover_t = ui.ctx().animate_bool(r.id.with("bubble_hover"), r.hovered());
             if plus {
                 ui.painter()
                     .circle_filled(r.rect.center(), 46.5, p.friends_card_bg);
+            } else if hover_t > 0.01 {
+                ui.painter().circle_filled(
+                    r.rect.center(),
+                    46.5,
+                    Color32::from_white_alpha((hover_t * 14.0).round() as u8),
+                );
             }
+            let ring_col = lerp_color(
+                p.friends_border,
+                if plus { GREEN } else { accent_color(ui) },
+                hover_t * 0.75,
+            );
             ui.painter().rect_stroke(
                 r.rect,
                 CornerRadius::same(48),
-                egui::Stroke::new(1.5, p.friends_border),
+                egui::Stroke::new(1.5 + hover_t * 1.0, ring_col),
                 egui::StrokeKind::Inside,
             );
             if plus {

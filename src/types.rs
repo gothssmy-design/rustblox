@@ -448,6 +448,15 @@ pub struct UserSearchPage {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct PlayerBadge {
+    pub id: u64,
+    pub name: String,
+    pub description: String,
+    pub icon: String,
+    pub awarded_date: String,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct FriendProfile {
     pub user: User,
     pub description: String,
@@ -459,6 +468,8 @@ pub struct FriendProfile {
     pub avatar: String,
     pub playing_game: Option<Game>,
     pub experiences: Vec<Game>,
+    pub favorites: Vec<Game>,
+    pub badges: Vec<PlayerBadge>,
     pub currently_wearing: Vec<AvatarAsset>,
 }
 
@@ -540,6 +551,9 @@ pub enum Action {
     SaveBio(String),
     OpenUrl(String),
     StartQuickLogin,
+    AddAccount,
+    SwitchAccount(u64),
+    RemoveAccount(u64),
     SignOut,
 }
 

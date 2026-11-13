@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, RichText, Sense};
 
 use crate::avatar_3d::{self, Avatar3DState, load_avatar_3d_data};
+use crate::fastflags::{load_fastflags, sync_client_fastflags, FastFlagsConfig};
 use crate::types::*;
 use crate::theme::*;
 use crate::auth::*;
@@ -93,7 +94,6 @@ pub struct RustBlox {
     pub my_profile: Option<FriendProfile>,
     pub my_profile_loading: bool,
     pub my_profile_err: Option<String>,
-    pub profile_3d_mode: bool,
     pub profile_bio_expanded: bool,
     pub profile_editing: bool,
     pub profile_edit_bio: String,
@@ -143,6 +143,14 @@ pub struct RustBlox {
     pub wallpaper_loading: Option<String>,
     pub wallpaper_err: Option<String>,
     pub settings_advanced_open: bool,
+
+    pub saved_accounts: Vec<StoredAccount>,
+    pub fastflags: FastFlagsConfig,
+    pub ff_new_key: String,
+    pub ff_new_val: String,
+    pub ff_json_buf: String,
+    pub ff_json_open: bool,
+    pub ff_err: Option<String>,
 }
 
 
@@ -153,6 +161,9 @@ impl RustBlox {
         let cookie = load_cookie();
         let logged_in = cookie.is_some();
         let settings = load_settings();
+        let saved_accounts = load_accounts();
+        let fastflags = load_fastflags();
+        let _ = sync_client_fastflags(&fastflags, settings.target_fps, &[]);
         install_fonts(&cc.egui_ctx);
         apply_theme(&cc.egui_ctx, &settings);
         let auto_close_flag = Arc::new(AtomicBool::new(settings.auto_close_roblox));
@@ -234,7 +245,6 @@ impl RustBlox {
             my_profile: None,
             my_profile_loading: false,
             my_profile_err: None,
-            profile_3d_mode: false,
             profile_bio_expanded: false,
             profile_editing: false,
             profile_edit_bio: String::new(),
@@ -280,6 +290,13 @@ impl RustBlox {
             wallpaper_loading: None,
             wallpaper_err: None,
             settings_advanced_open: false,
+            saved_accounts,
+            fastflags,
+            ff_new_key: String::new(),
+            ff_new_val: String::new(),
+            ff_json_buf: String::new(),
+            ff_json_open: false,
+            ff_err: None,
         };
         if app.settings.bg_mode == BgMode::Wallpaper && !app.settings.bg_wallpaper.trim().is_empty() {
             let path = app.settings.bg_wallpaper.clone();
@@ -637,22 +654,7 @@ impl RustBlox {
         });
     }
 
-    pub fn sign_out(&mut self) {
-        self.cancel_quick_login();
-        if let Some(old_cookie) = self.cookie.take() {
-            self.spawn(move || {
-                let res = post_csrf(
-                    "https://auth.roblox.com/v2/logout",
-                    serde_json::json!({}),
-                    Some(&old_cookie),
-                    Some("https://www.roblox.com/"),
-                )
-                .map(|_| ());
-                Msg::ServerLogoutDone(res)
-            });
-        }
-        clear_cookie();
-        let _ = fs::remove_file(data_dir().join("username.txt"));
+    pub fn reset_session_caches(&mut self) {
         self.username.clear();
         self.me = None;
         self.me_err = None;
@@ -698,7 +700,6 @@ impl RustBlox {
         self.my_profile = None;
         self.my_profile_loading = false;
         self.my_profile_err = None;
-        self.profile_3d_mode = false;
         self.profile_bio_expanded = false;
         self.profile_editing = false;
         self.profile_edit_bio.clear();
@@ -741,9 +742,114 @@ impl RustBlox {
         self.server_sort = ServerSort::Default;
         self.server_exclude_full = false;
         self.ctx.forget_all_images();
+    }
+
+    pub fn record_active_account(&mut self, prof: &Profile) {
+        let Some(cookie) = self.cookie.as_deref() else {
+            return;
+        };
+        upsert_stored_account(&mut self.saved_accounts, &prof.user, cookie, now_unix_ms());
+        let _ = save_accounts(&self.saved_accounts);
+    }
+
+    pub fn switch_account(&mut self, user_id: u64) {
+        let Some(pos) = self.saved_accounts.iter().position(|a| a.id == user_id) else {
+            return;
+        };
+        let target_cookie = self.saved_accounts[pos].cookie.clone();
+        let target_name = self.saved_accounts[pos].name.clone();
+        if self.cookie.as_deref() == Some(target_cookie.as_str())
+            && self.me.as_ref().is_some_and(|p| p.user.id == user_id)
+        {
+            return;
+        }
+        self.cancel_quick_login();
+        self.saved_accounts[pos].last_used_ms = now_unix_ms();
+        let _ = save_accounts(&self.saved_accounts);
+        if let Err(e) = save_cookie(&target_cookie) {
+            self.status = format!("Switched account, but could not save session: {e}");
+        } else {
+            self.status = format!("Switched to @{target_name}");
+        }
+        self.reset_session_caches();
+        self.cookie = Some(target_cookie);
+        if matches!(self.page, Page::Login | Page::Friend(_)) {
+            self.page = Page::Home;
+        }
+        self.back = Page::Home;
+        self.sync_sorts(true);
+        self.sync_saved(true);
+        self.sync_auth_session(true);
+    }
+
+    pub fn remove_saved_account(&mut self, user_id: u64) {
+        let is_active = self.me.as_ref().is_some_and(|p| p.user.id == user_id)
+            || self
+                .saved_accounts
+                .iter()
+                .find(|a| a.id == user_id)
+                .is_some_and(|a| self.cookie.as_deref() == Some(a.cookie.as_str()));
+        let removed = remove_stored_account(&mut self.saved_accounts, user_id);
+        let _ = save_accounts(&self.saved_accounts);
+        if is_active {
+            if let Some(next_id) = self.saved_accounts.first().map(|a| a.id) {
+                self.switch_account(next_id);
+                if let Some(acc) = removed {
+                    self.status = format!(
+                        "Removed @{} — switched to @{}",
+                        acc.name,
+                        self.saved_accounts
+                            .first()
+                            .map(|a| a.name.as_str())
+                            .unwrap_or("")
+                    );
+                }
+            } else {
+                self.cancel_quick_login();
+                self.cookie = None;
+                clear_cookie();
+                let _ = fs::remove_file(data_dir().join("username.txt"));
+                self.reset_session_caches();
+                self.page = Page::Login;
+                self.back = Page::Login;
+                self.status = "Account removed — sign in with Quick Login to continue.".to_string();
+            }
+        } else if let Some(acc) = removed {
+            self.status = format!("Removed saved account @{}", acc.name);
+        }
+    }
+
+    pub fn sign_out(&mut self) {
+        self.cancel_quick_login();
+        let active_id = self.me.as_ref().map(|p| p.user.id);
+        if let Some(old_cookie) = self.cookie.take() {
+            if let Some(uid) = active_id {
+                remove_stored_account(&mut self.saved_accounts, uid);
+            } else if let Some(pos) = self.saved_accounts.iter().position(|a| a.cookie == old_cookie) {
+                self.saved_accounts.remove(pos);
+            }
+            let _ = save_accounts(&self.saved_accounts);
+            self.spawn(move || {
+                let res = post_csrf(
+                    "https://auth.roblox.com/v2/logout",
+                    serde_json::json!({}),
+                    Some(&old_cookie),
+                    Some("https://www.roblox.com/"),
+                )
+                .map(|_| ());
+                Msg::ServerLogoutDone(res)
+            });
+        }
+        if let Some(next_id) = self.saved_accounts.first().map(|a| a.id) {
+            self.switch_account(next_id);
+            return;
+        }
+        clear_cookie();
+        let _ = fs::remove_file(data_dir().join("username.txt"));
+        self.reset_session_caches();
         self.page = Page::Login;
         self.back = Page::Login;
-        self.status = "Signed out â€” sign in with Quick Login to continue.".to_string();
+        self.status = "Signed out — sign in with Quick Login to continue.".to_string();
     }
 
     pub fn request_thumbs(&mut self, ids: Vec<u64>) {
@@ -1156,6 +1262,7 @@ impl RustBlox {
                         Ok(fp) => {
                             let mut ids: Vec<u64> =
                                 fp.experiences.iter().map(|g| g.universe_id).collect();
+                            ids.extend(fp.favorites.iter().map(|g| g.universe_id));
                             if let Some(g) = &fp.playing_game {
                                 ids.push(g.universe_id);
                             }
@@ -1195,6 +1302,7 @@ impl RustBlox {
                             Ok(fp) => {
                                 let mut ids: Vec<u64> =
                                     fp.experiences.iter().map(|g| g.universe_id).collect();
+                                ids.extend(fp.favorites.iter().map(|g| g.universe_id));
                                 if let Some(g) = &fp.playing_game {
                                     ids.push(g.universe_id);
                                 }
@@ -1443,6 +1551,7 @@ impl RustBlox {
                                     }
                                 }
                             }
+                            self.record_active_account(&profile);
                             self.me = Some(profile);
                             self.me_err = None;
                             self.friends = friends;
@@ -1497,6 +1606,7 @@ impl RustBlox {
                 Msg::QuickLoginDone(r) => match r {
                     Ok(cookie) => {
                         self.cancel_quick_login();
+                        self.reset_session_caches();
                         if let Err(e) = save_cookie(&cookie) {
                             self.status = format!("Signed in, but could not save session: {e}");
                         } else {
@@ -1519,7 +1629,7 @@ impl RustBlox {
                 Msg::ServerLogoutDone(r) => {
                     if self.cookie.is_none() {
                         self.status = match r {
-                            Ok(()) => "Signed out â€” session revoked on Roblox.".to_string(),
+                            Ok(()) => "Signed out — session revoked on Roblox.".to_string(),
                             Err(_) => "Signed out locally (could not reach Roblox to revoke token).".to_string(),
                         };
                     }
@@ -2063,6 +2173,26 @@ impl eframe::App for RustBlox {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if logged_in {
                             if let Some(prof) = &self.me {
+                                let p = pal(ui);
+                                let (switch_rect, switch_btn) = ui.allocate_exact_size(
+                                    egui::vec2(22.0, 24.0),
+                                    Sense::click(),
+                                );
+                                if switch_btn.hovered() {
+                                    ui.painter().rect_filled(switch_rect, 6.0, p.hover_bg);
+                                }
+                                let c = switch_rect.center();
+                                let chev_col = if switch_btn.hovered() { p.text } else { p.muted };
+                                ui.painter().line_segment(
+                                    [egui::pos2(c.x - 4.0, c.y - 1.5), egui::pos2(c.x, c.y + 2.5)],
+                                    egui::Stroke::new(1.5, chev_col),
+                                );
+                                ui.painter().line_segment(
+                                    [egui::pos2(c.x, c.y + 2.5), egui::pos2(c.x + 4.0, c.y - 1.5)],
+                                    egui::Stroke::new(1.5, chev_col),
+                                );
+                                let switch_btn = switch_btn.on_hover_text("Accounts & menu");
+
                                 let resp = ui
                                     .horizontal(|ui| {
                                         let n = ui.horizontal(|ui| {
@@ -2092,36 +2222,122 @@ impl eframe::App for RustBlox {
                                 if resp.0 {
                                     acts.push(Action::Go(Page::Profile));
                                 }
+                                let active_uid = prof.user.id;
+                                let saved_list = self.saved_accounts.clone();
+                                let dark_mode = self.settings.dark;
+                                let menu_item =
+                                    |ui: &mut egui::Ui, label: &str, col: Option<egui::Color32>| -> bool {
+                                        let w = ui.available_width();
+                                        let (rect, r) = ui.allocate_exact_size(
+                                            egui::vec2(w, 26.0),
+                                            Sense::click(),
+                                        );
+                                        if r.hovered() {
+                                            ui.painter().rect_filled(rect, 5.0, p.hover_bg);
+                                        }
+                                        ui.painter().text(
+                                            egui::pos2(rect.left() + 8.0, rect.center().y),
+                                            egui::Align2::LEFT_CENTER,
+                                            label,
+                                            egui::FontId::proportional(12.5),
+                                            col.unwrap_or(p.text),
+                                        );
+                                        r.clicked()
+                                    };
                                 let mut menu = |ui: &mut egui::Ui| {
-                                    if ui.button("Profile").clicked() {
+                                    ui.set_width(210.0);
+                                    ui.spacing_mut().item_spacing.y = 2.0;
+                                    for acc in &saved_list {
+                                        let is_cur = acc.id == active_uid;
+                                        let (rect, r) = ui.allocate_exact_size(
+                                            egui::vec2(ui.available_width(), 38.0),
+                                            Sense::click(),
+                                        );
+                                        if r.hovered() && !is_cur {
+                                            ui.painter().rect_filled(rect, 6.0, p.hover_bg);
+                                        } else if is_cur {
+                                            ui.painter().rect_filled(
+                                                rect,
+                                                6.0,
+                                                p.selected_bg.gamma_multiply(0.55),
+                                            );
+                                        }
+                                        let mut row_ui = ui.new_child(
+                                            egui::UiBuilder::new().max_rect(
+                                                rect.shrink2(egui::vec2(6.0, 4.0)),
+                                            ),
+                                        );
+                                        row_ui.horizontal(|ui| {
+                                            let _ = thumb_styled(
+                                                ui,
+                                                Some(&acc.headshot),
+                                                egui::vec2(24.0, 24.0),
+                                                12,
+                                                true,
+                                            );
+                                            ui.vertical(|ui| {
+                                                ui.spacing_mut().item_spacing.y = -1.0;
+                                                ui.label(
+                                                    RichText::new(&acc.display)
+                                                        .size(12.5)
+                                                        .strong(),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format!("@{}", acc.name))
+                                                        .size(10.5)
+                                                        .color(p.muted),
+                                                );
+                                            });
+                                        });
+                                        if is_cur {
+                                            ui.painter().circle_filled(
+                                                egui::pos2(rect.right() - 12.0, rect.center().y),
+                                                3.5,
+                                                GREEN,
+                                            );
+                                        } else if r.clicked() {
+                                            acts.push(Action::SwitchAccount(acc.id));
+                                            ui.close();
+                                        }
+                                    }
+                                    if menu_item(ui, "+ Add account", Some(p.muted)) {
+                                        acts.push(Action::AddAccount);
+                                        ui.close();
+                                    }
+                                    ui.separator();
+                                    if menu_item(ui, "Profile", None) {
                                         acts.push(Action::Go(Page::Profile));
                                         ui.close();
                                     }
-                                    if ui.button("Avatar").clicked() {
+                                    if menu_item(ui, "Avatar", None) {
                                         acts.push(Action::Go(Page::Avatar));
                                         ui.close();
                                     }
-                                    if ui.button("Settings").clicked() {
+                                    if menu_item(ui, "Settings", None) {
                                         acts.push(Action::Go(Page::Settings));
                                         ui.close();
                                     }
-                                    if ui
-                                        .button(if self.settings.dark {
-                                            "Switch to Light mode"
+                                    if menu_item(
+                                        ui,
+                                        if dark_mode {
+                                            "Light mode"
                                         } else {
-                                            "Switch to Dark mode"
-                                        })
-                                        .clicked()
-                                    {
+                                            "Dark mode"
+                                        },
+                                        None,
+                                    ) {
                                         toggle_theme = true;
                                         ui.close();
                                     }
                                     ui.separator();
-                                    if ui.button(RichText::new("Sign out").color(RED)).clicked() {
+                                    if menu_item(ui, "Sign out", Some(RED)) {
                                         acts.push(Action::SignOut);
                                         ui.close();
                                     }
                                 };
+                                egui::Popup::from_toggle_button_response(&switch_btn)
+                                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                                    .show(&mut menu);
                                 resp.1.context_menu(&mut menu);
                                 resp.2.context_menu(&mut menu);
 
@@ -2243,6 +2459,41 @@ impl eframe::App for RustBlox {
                         if !logged_in {
                             self.page_login(ui, &mut acts);
                         } else {
+                            let page_key: (u8, u64) = match &self.page {
+                                Page::Home => (0, 0),
+                                Page::Charts => (1, self.chart as u64),
+                                Page::Search => (2, 0),
+                                Page::Game(g) => (3, g.universe_id),
+                                Page::Friend(u) => (4, u.id),
+                                Page::AddFriend => (5, 0),
+                                Page::Profile => (6, 0),
+                                Page::Avatar => (7, 0),
+                                Page::Settings => (8, 0),
+                                Page::Login => (9, 0),
+                            };
+                            let anim_state_id = egui::Id::NULL.with("page_transition_state");
+                            let now = ui.input(|i| i.time);
+                            let entered_at = ui.ctx().data_mut(|d| {
+                                let (prev_k, prev_t) = d
+                                    .get_temp::<((u8, u64), f64)>(anim_state_id)
+                                    .unwrap_or((page_key, now));
+                                if prev_k != page_key {
+                                    d.insert_temp(anim_state_id, (page_key, now));
+                                    now
+                                } else {
+                                    d.insert_temp(anim_state_id, (prev_k, prev_t));
+                                    prev_t
+                                }
+                            });
+                            let raw_t = ((now - entered_at) as f32 / 0.16).clamp(0.0, 1.0);
+                            let ease = 1.0 - (1.0 - raw_t).powi(3);
+                            if raw_t < 1.0 {
+                                ui.ctx().request_repaint();
+                            }
+                            if !matches!(self.page, Page::Login) {
+                                ui.add_space((1.0 - ease) * 6.0);
+                                ui.set_opacity(0.45 + 0.55 * ease);
+                            }
                             match self.page.clone() {
                                 Page::Home => self.page_home(ui, &mut acts),
                                 Page::Charts => self.page_charts(ui, &mut acts),
@@ -2282,6 +2533,9 @@ impl eframe::App for RustBlox {
             match a {
                 Action::HoverGame(_) => {}
                 Action::StartQuickLogin => self.begin_quick_login(),
+                Action::AddAccount => self.begin_quick_login(),
+                Action::SwitchAccount(uid) => self.switch_account(uid),
+                Action::RemoveAccount(uid) => self.remove_saved_account(uid),
                 Action::SignOut => self.sign_out(),
                 Action::OpenUrl(u) => {
                     if let Err(e) = open::that(&u) {

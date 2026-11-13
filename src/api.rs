@@ -10,8 +10,8 @@ use serde_json::Value;
 
 use crate::types::{
     AvatarAsset, AvatarScales, AvatarState, AvatarTab, BodyColors, FriendProfile, Game, GameExtra,
-    GamePassItem, Msg, OmniHome, OutfitItem, PaletteColor, Profile, SavedSyncData, ServerItem,
-    Sort, User, UserSearchPage,
+    GamePassItem, Msg, OmniHome, OutfitItem, PaletteColor, PlayerBadge, Profile, SavedSyncData,
+    ServerItem, Sort, User, UserSearchPage,
 };
 use crate::video_preview;
 
@@ -1271,6 +1271,80 @@ pub fn update_user_description(cookie: &str, description: &str) -> Result<String
     }
 }
 
+fn fetch_profile_favorites(user_id: u64, cookie: Option<&str>) -> Vec<Game> {
+    let url = format!(
+        "https://games.roblox.com/v2/users/{user_id}/favorite/games?accessFilter=2&sortOrder=Desc&limit=12"
+    );
+    let json = if let Some(c) = cookie {
+        auth_get_json(&url, Some(c)).or_else(|_| get_json(&url))
+    } else {
+        get_json(&url)
+    };
+    let Ok(v) = json else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    let mut fav_ids = Vec::new();
+    for item in v["data"].as_array().into_iter().flatten() {
+        if let Some(id) = item["id"].as_u64() {
+            if let Some(pid) = item["rootPlace"]["id"].as_u64() {
+                remember_place_universe(pid, id);
+            }
+            if id > 0 && seen.insert(id) {
+                fav_ids.push(id);
+            }
+        }
+    }
+    if fav_ids.is_empty() {
+        Vec::new()
+    } else {
+        games_by_universe(&fav_ids)
+    }
+}
+
+fn fetch_user_badges(user_id: u64) -> Vec<PlayerBadge> {
+    let Ok(v) = get_json(&format!(
+        "https://badges.roblox.com/v1/users/{user_id}/badges?limit=12&sortOrder=Desc"
+    )) else {
+        return Vec::new();
+    };
+    let mut badges: Vec<PlayerBadge> = v["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|b| {
+            let id = b["id"].as_u64()?;
+            Some(PlayerBadge {
+                id,
+                name: str_of(&b["name"]),
+                description: str_of(&b["description"]),
+                icon: String::new(),
+                awarded_date: str_of(&b["awardedDate"]).chars().take(10).collect(),
+            })
+        })
+        .collect();
+    let ids: Vec<u64> = badges.iter().map(|b| b.id).collect();
+    if !ids.is_empty() {
+        if let Ok(t) = get_json(&format!(
+            "https://thumbnails.roblox.com/v1/badges/icons?badgeIds={}&size=150x150&format=Png&isCircular=false",
+            join(&ids)
+        )) {
+            let map: HashMap<u64, String> = t["data"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|d| Some((d["targetId"].as_u64()?, str_of(&d["imageUrl"]))))
+                .collect();
+            for b in &mut badges {
+                if let Some(url) = map.get(&b.id) {
+                    b.icon = url.clone();
+                }
+            }
+        }
+    }
+    badges
+}
+
 pub fn fetch_friend_profile(mut user: User, cookie: Option<String>) -> Result<FriendProfile, String> {
     let id = user.id;
     let info = get_json(&format!("https://users.roblox.com/v1/users/{id}"))?;
@@ -1286,6 +1360,15 @@ pub fn fetch_friend_profile(mut user: User, cookie: Option<String>) -> Result<Fr
     user.verified = verified;
 
     enrich_users(std::slice::from_mut(&mut user), cookie.as_deref());
+
+    if let Ok(hd) = get_json(&format!(
+        "https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={id}&size=420x420&format=Png&isCircular=false"
+    )) {
+        let hd_url = str_of(&hd["data"][0]["imageUrl"]);
+        if !hd_url.is_empty() {
+            user.headshot = hd_url;
+        }
+    }
 
     let count_of = |endpoint: &str| -> u64 {
         get_json(&format!("https://friends.roblox.com/v1/users/{id}/{endpoint}/count"))
@@ -1327,6 +1410,8 @@ pub fn fetch_friend_profile(mut user: User, cookie: Option<String>) -> Result<Fr
         games_by_universe(&exp_ids)
     };
 
+    let favorites = fetch_profile_favorites(id, cookie.as_deref());
+    let badges = fetch_user_badges(id);
     let currently_wearing = fetch_user_currently_wearing(id, cookie.as_deref());
 
     Ok(FriendProfile {
@@ -1340,6 +1425,8 @@ pub fn fetch_friend_profile(mut user: User, cookie: Option<String>) -> Result<Fr
         avatar,
         playing_game,
         experiences,
+        favorites,
+        badges,
         currently_wearing,
     })
 }

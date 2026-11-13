@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use serde_json::Value;
 use windows_sys::Win32::Foundation::{
     CloseHandle, FALSE, FILETIME, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, TRUE, WPARAM,
 };
@@ -51,38 +50,8 @@ pub fn find_player() -> Option<PathBuf> {
 }
 
 pub fn apply_fps_setting(target_fps: Option<u32>) -> Result<(), String> {
-    let player = find_player()
-        .ok_or_else(|| "Roblox is not installed. Install it once from roblox.com first.".to_string())?;
-    let version_dir = player
-        .parent()
-        .ok_or_else(|| "Could not determine Roblox version directory".to_string())?;
-    let cs_dir = version_dir.join("ClientSettings");
-    let cs_file = cs_dir.join("ClientAppSettings.json");
-
-    let mut map = if let Ok(existing) = fs::read_to_string(&cs_file) {
-        serde_json::from_str::<serde_json::Map<String, Value>>(&existing).unwrap_or_default()
-    } else {
-        serde_json::Map::new()
-    };
-
-    if let Some(fps) = target_fps {
-        map.insert("DFIntTaskSchedulerTargetFps".to_string(), Value::from(fps));
-        fs::create_dir_all(&cs_dir).map_err(|e| e.to_string())?;
-        let text = serde_json::to_string_pretty(&Value::Object(map)).map_err(|e| e.to_string())?;
-        fs::write(&cs_file, text).map_err(|e| e.to_string())?;
-    } else {
-        map.remove("DFIntTaskSchedulerTargetFps");
-        if cs_file.exists() {
-            if map.is_empty() {
-                let _ = fs::remove_file(&cs_file);
-            } else {
-                let text =
-                    serde_json::to_string_pretty(&Value::Object(map)).map_err(|e| e.to_string())?;
-                fs::write(&cs_file, text).map_err(|e| e.to_string())?;
-            }
-        }
-    }
-    Ok(())
+    let cfg = crate::fastflags::load_fastflags();
+    crate::fastflags::sync_client_fastflags(&cfg, target_fps, &[])
 }
 
 pub fn now_unix_ms() -> u64 {
@@ -607,6 +576,7 @@ pub fn launch_authenticated_server(
         "roblox-player:1+launchmode:play+gameinfo:{ticket}+launchtime:{ms}+placelauncherurl:{}+robloxLocale:en_us+gameLocale:en_us",
         enc(&launcher_url)
     );
+    let _ = crate::fastflags::sync_saved_fastflags_before_launch();
     launch_from_uri(&uri, true)?;
     Ok(if job_id.is_some() {
         "Joining selected server...".to_string()

@@ -531,6 +531,10 @@ pub fn theme_accent(settings: &Settings) -> Color32 {
     }
 }
 
+pub fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    mix_color(a, [b.r(), b.g(), b.b()], t, a.a())
+}
+
 pub fn accent_color(ui: &egui::Ui) -> Color32 {
     ui.visuals().selection.stroke.color
 }
@@ -600,6 +604,7 @@ pub fn apply_theme(ctx: &egui::Context, settings: &Settings) {
     ctx.set_theme(theme);
     ctx.style_mut_of(theme, |s| {
         s.visuals = v;
+        s.animation_time = 0.16;
         s.spacing.button_padding = egui::vec2(14.0, 7.0);
         s.spacing.item_spacing = egui::vec2(10.0, 8.0);
         s.spacing.scroll = egui::style::ScrollStyle::floating();
