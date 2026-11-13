@@ -2645,7 +2645,9 @@ impl eframe::App for RustBlox {
         }
         if !self.app_update_checked {
             self.app_update_checked = true;
-            self.check_app_updates(false);
+            if self.settings.auto_check_updates {
+                self.check_app_updates(false);
+            }
         }
         self.maybe_auto_sync(ui.ctx());
         if matches!(self.page, Page::Settings) {

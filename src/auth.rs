@@ -110,6 +110,7 @@ pub fn load_settings() -> Settings {
         target_fps: v["target_fps"].as_u64().and_then(|n| u32::try_from(n).ok()),
         auto_close_roblox: v["auto_close_roblox"].as_bool().unwrap_or(true),
         notifications_silent: v["notifications_silent"].as_bool().unwrap_or(false),
+        auto_check_updates: v["auto_check_updates"].as_bool().unwrap_or(true),
     }
 }
 
@@ -140,6 +141,7 @@ pub fn save_settings(s: &Settings) {
         "target_fps": s.target_fps,
         "auto_close_roblox": s.auto_close_roblox,
         "notifications_silent": s.notifications_silent,
+        "auto_check_updates": s.auto_check_updates,
     });
     if let Ok(text) = serde_json::to_string_pretty(&v) {
         let _ = fs::write(data_dir().join("settings.json"), text);

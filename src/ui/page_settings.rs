@@ -1500,9 +1500,24 @@ impl RustBlox {
             ui.add_space(4.0);
             small_text(
                 ui,
-                "Download new RustBlox versions and UI updates directly inside the app — no uninstall or reinstall needed."
+                "Download new RustBlox versions and UI updates directly inside the app — only when you click Update."
                     .to_string(),
             );
+            ui.add_space(6.0);
+            let prev_auto_check = self.settings.auto_check_updates;
+            ui.checkbox(
+                &mut self.settings.auto_check_updates,
+                "Check for RustBlox updates on startup (never installs automatically)",
+            );
+            if self.settings.auto_check_updates != prev_auto_check {
+                save_settings(&self.settings);
+                self.status = if self.settings.auto_check_updates {
+                    "Startup RustBlox update checks enabled.".to_string()
+                } else {
+                    "Startup RustBlox update checks disabled — click Check for Updates anytime."
+                        .to_string()
+                };
+            }
 
             if self.app_update_downloading {
                 ui.add_space(10.0);

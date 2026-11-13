@@ -39,6 +39,7 @@ pub struct Settings {
     pub target_fps: Option<u32>,
     pub auto_close_roblox: bool,
     pub notifications_silent: bool,
+    pub auto_check_updates: bool,
 }
 
 impl Default for Settings {
@@ -58,6 +59,7 @@ impl Default for Settings {
             target_fps: None,
             auto_close_roblox: true,
             notifications_silent: false,
+            auto_check_updates: true,
         }
     }
 }

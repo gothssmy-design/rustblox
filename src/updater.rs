@@ -912,4 +912,68 @@ mod tests {
             Some("Applied FPS & telemetry patch live.")
         );
     }
+
+    #[test]
+    fn streams_download_validates_pe_and_swaps_target_exe() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().unwrap();
+
+        let mut fake_pe = vec![0x90u8; 80 * 1024];
+        fake_pe[0] = b'M';
+        fake_pe[1] = b'Z';
+        fake_pe[2..6].copy_from_slice(b"V011");
+
+        let server_payload = fake_pe.clone();
+        let server = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut req = [0u8; 1024];
+                let _ = stream.read(&mut req);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    server_payload.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&server_payload);
+            }
+        });
+
+        let dir = std::env::temp_dir().join(format!(
+            "rustblox_updater_test_{}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let target_exe = dir.join("rustblox.exe");
+        let staged_exe = dir.join("rustblox.exe.new");
+        fs::write(&target_exe, b"OLD_VERSION_BYTES").unwrap();
+
+        let dl = AtomicU64::new(0);
+        let total = AtomicU64::new(0);
+        let ctx = egui::Context::default();
+        let url = format!("http://{addr}/rustblox.exe");
+        stream_download_exe(
+            &url,
+            &staged_exe,
+            fake_pe.len() as u64,
+            &dl,
+            &total,
+            None,
+            &ctx,
+        )
+        .expect("stream download should succeed");
+
+        assert_eq!(dl.load(Ordering::Relaxed), fake_pe.len() as u64);
+        assert_eq!(total.load(Ordering::Relaxed), fake_pe.len() as u64);
+
+        swap_binary_with_retries(&target_exe, &staged_exe).expect("binary swap should succeed");
+        let swapped = fs::read(&target_exe).unwrap();
+        assert_eq!(swapped.len(), fake_pe.len());
+        assert_eq!(&swapped[0..6], b"MZV011");
+        let backup = fs::read(dir.join("rustblox.exe.old")).unwrap();
+        assert_eq!(backup, b"OLD_VERSION_BYTES");
+
+        let _ = server.join();
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
