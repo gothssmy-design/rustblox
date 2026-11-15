@@ -40,6 +40,12 @@ pub struct RustBlox {
     pub searched: String,
     pub searching: bool,
     pub results: Option<Result<Vec<Game>, String>>,
+    pub manual_game_open: bool,
+    pub manual_game_input: String,
+    pub manual_game_loading: bool,
+    pub manual_game_focus_requested: bool,
+    pub manual_game_err: Option<String>,
+    pub active_private_server: Option<(u64, u64, String)>,
 
     pub sorts: Option<Result<Vec<Sort>, String>>,
     pub chart: usize,
@@ -224,6 +230,12 @@ impl RustBlox {
             searched: String::new(),
             searching: false,
             results: None,
+            manual_game_open: false,
+            manual_game_input: String::new(),
+            manual_game_loading: false,
+            manual_game_focus_requested: false,
+            manual_game_err: None,
+            active_private_server: None,
             sorts: None,
             chart: 0,
             recent_ids: read_ids("recent.txt"),
@@ -867,6 +879,12 @@ impl RustBlox {
         self.searched.clear();
         self.searching = false;
         self.results = None;
+        self.manual_game_open = false;
+        self.manual_game_input.clear();
+        self.manual_game_loading = false;
+        self.manual_game_focus_requested = false;
+        self.manual_game_err = None;
+        self.active_private_server = None;
         self.sorts = None;
         self.recent.clear();
         self.favs.clear();
@@ -1081,16 +1099,10 @@ impl RustBlox {
         self.searching = true;
         self.results = None;
         self.page = Page::Search;
-        if let Ok(place) = q.parse::<u64>() {
-            // A number is treated as a Place ID
-            self.spawn(move || {
-                Msg::Lookup(
-                    games_by_places(&[place])
-                        .into_iter()
-                        .next()
-                        .ok_or_else(|| "No game with that Place ID".to_string()),
-                )
-            });
+        if parse_game_link(&q).is_some() {
+            // URLs and numeric Place IDs resolve directly to the game page
+            let cookie = self.cookie.clone();
+            self.spawn(move || Msg::Lookup(resolve_game_link(&q, cookie.as_deref())));
         } else {
             let sid = new_session_id();
             self.sid = sid.clone();
@@ -1099,6 +1111,27 @@ impl RustBlox {
                 Msg::Search(q, r)
             });
         }
+    }
+
+    pub fn start_manual_game_lookup(&mut self, intent: ManualGameIntent) {
+        if self.manual_game_loading || self.cookie.is_none() {
+            return;
+        }
+        let raw = self.manual_game_input.trim().to_string();
+        if parse_game_link(&raw).is_none() {
+            self.manual_game_err = Some(
+                "Enter a valid Roblox game URL or numeric Place ID (e.g. https://www.roblox.com/games/1818/...)."
+                    .to_string(),
+            );
+            return;
+        }
+        self.manual_game_loading = true;
+        self.manual_game_err = None;
+        let cookie = self.cookie.clone();
+        self.spawn(move || Msg::ManualGameLookup {
+            intent,
+            result: resolve_game_link(&raw, cookie.as_deref()),
+        });
     }
 
     pub fn poll(&mut self) -> bool {
@@ -1155,11 +1188,26 @@ impl RustBlox {
                     }
                     self.searching = false;
                     match r {
-                        Ok(g) => {
+                        Ok(resolved) => {
                             self.back = Page::Home;
-                            self.open_game_details(g);
+                            self.apply_resolved_game_link(resolved, ManualGameIntent::Open);
                         }
                         Err(e) => self.results = Some(Err(e)),
+                    }
+                }
+                Msg::ManualGameLookup { intent, result } => {
+                    if !logged_in {
+                        continue;
+                    }
+                    self.manual_game_loading = false;
+                    match result {
+                        Ok(resolved) => {
+                            self.manual_game_open = false;
+                            self.manual_game_err = None;
+                            self.manual_game_input.clear();
+                            self.apply_resolved_game_link(resolved, intent);
+                        }
+                        Err(e) => self.manual_game_err = Some(e),
                     }
                 }
                 Msg::Details(Some(full)) => {
@@ -2479,6 +2527,49 @@ impl RustBlox {
         }
     }
 
+    pub fn launch_private_server(&self, place_id: u64, link_code: String) {
+        if let Some(cookie) = self.cookie.clone() {
+            self.last_roblox_launch_ms
+                .store(now_unix_ms(), Ordering::Relaxed);
+            self.spawn(move || {
+                Msg::LaunchResult(launch_authenticated_private_server(
+                    place_id,
+                    &link_code,
+                    &cookie,
+                ))
+            });
+        }
+    }
+
+    pub fn apply_resolved_game_link(
+        &mut self,
+        resolved: ResolvedGameLink,
+        intent: ManualGameIntent,
+    ) {
+        self.request_thumbs(vec![resolved.game.universe_id]);
+        match intent {
+            ManualGameIntent::Open => {
+                self.active_private_server = resolved
+                    .private_server_code
+                    .map(|code| (resolved.game.universe_id, resolved.place_id, code));
+                self.open_game_details(resolved.game);
+            }
+            ManualGameIntent::Favorite => {
+                self.add_favorite(&resolved.game);
+            }
+            ManualGameIntent::Play => {
+                self.record_recent_game(resolved.game.clone());
+                if let Some(code) = resolved.private_server_code {
+                    self.status = format!("Joining private server for {}...", resolved.game.name);
+                    self.launch_private_server(resolved.place_id, code);
+                } else {
+                    self.status = format!("Launching {}...", resolved.game.name);
+                    self.launch_place_id(resolved.place_id);
+                }
+            }
+        }
+    }
+
     pub fn play(&mut self, g: &Game) {
         if self.cookie.is_none() {
             return;
@@ -2519,6 +2610,212 @@ impl RustBlox {
         if let Some(cookie) = self.cookie.clone() {
             let uid = g.universe_id;
             self.spawn(move || Msg::GameFavDone(uid, now_fav, favorite_game_api(uid, now_fav, &cookie)));
+        }
+    }
+
+    pub fn add_favorite(&mut self, g: &Game) {
+        if self.fav_ids.contains(&g.place_id) {
+            self.status = format!("{} is already in Favorites", g.name);
+        } else {
+            self.toggle_fav(g);
+        }
+    }
+
+    pub fn render_manual_game_modal(&mut self, ctx: &egui::Context) {
+        if !self.manual_game_open {
+            return;
+        }
+        let screen_rect = ctx.input(|i| i.content_rect());
+        if !screen_rect.is_positive() {
+            return;
+        }
+        let mut close_modal = ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !self.manual_game_loading;
+        let mut trigger_intent: Option<ManualGameIntent> = None;
+
+        egui::Area::new(egui::Id::NULL.with("manual_game_backdrop"))
+            .fixed_pos(screen_rect.min)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let (rect, resp) =
+                    ui.allocate_exact_size(screen_rect.size(), Sense::click());
+                ui.painter()
+                    .rect_filled(rect, 0.0, egui::Color32::from_black_alpha(140));
+                if resp.clicked() && !self.manual_game_loading {
+                    close_modal = true;
+                }
+            });
+
+        let modal_w = (screen_rect.width() - 48.0).clamp(320.0, 480.0);
+        egui::Area::new(egui::Id::NULL.with("manual_game_modal"))
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let p = pal(ui);
+                egui::Frame::new()
+                    .fill(p.card_bg)
+                    .stroke(egui::Stroke::new(1.2, p.border))
+                    .corner_radius(16)
+                    .inner_margin(egui::Margin::same(20))
+                    .show(ui, |ui| {
+                        ui.set_width(modal_w);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Open or Add Game by Link").size(18.0).strong());
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let close_btn = ui.add_enabled(
+                                        !self.manual_game_loading,
+                                        egui::Button::new(
+                                            RichText::new("\u{00D7}").size(16.0).color(p.muted),
+                                        )
+                                        .frame(false),
+                                    );
+                                    if close_btn.clicked() {
+                                        close_modal = true;
+                                    }
+                                },
+                            );
+                        });
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(
+                                "Paste a Roblox game link, private server link, share link, or Place ID.",
+                            )
+                            .size(12.5)
+                            .color(p.muted),
+                        );
+                        ui.add_space(12.0);
+
+                        egui::Frame::new()
+                            .fill(p.surface_bg)
+                            .stroke(egui::Stroke::new(1.2, p.text_border))
+                            .corner_radius(10)
+                            .inner_margin(egui::Margin::symmetric(12, 9))
+                            .show(ui, |ui| {
+                                ui.set_width((modal_w - 26.0).max(200.0));
+                                let resp = ui.add_enabled(
+                                    !self.manual_game_loading,
+                                    egui::TextEdit::singleline(&mut self.manual_game_input)
+                                        .frame(egui::Frame::NONE)
+                                        .hint_text(
+                                            "https://www.roblox.com/games/2753915549/... or Place ID",
+                                        )
+                                        .desired_width(ui.available_width()),
+                                );
+                                if self.manual_game_focus_requested {
+                                    resp.request_focus();
+                                    self.manual_game_focus_requested = false;
+                                }
+                                if resp.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                    && !self.manual_game_loading
+                                {
+                                    trigger_intent = Some(ManualGameIntent::Open);
+                                }
+                            });
+
+                        ui.add_space(8.0);
+                        let parsed = parse_game_link(&self.manual_game_input);
+                        if let Some(info) = &parsed {
+                            let summary = if let Some(pid) = info.place_id {
+                                if info.private_server_code.is_some() {
+                                    format!("Detected Place ID {pid} • Private server link")
+                                } else {
+                                    format!("Detected Place ID {pid}")
+                                }
+                            } else {
+                                "Detected Roblox share link".to_string()
+                            };
+                            ui.label(RichText::new(summary).size(12.0).color(GREEN));
+                        } else if !self.manual_game_input.trim().is_empty() {
+                            ui.label(
+                                RichText::new(
+                                    "Examples: roblox.com/games/<id>/..., roblox://placeId=<id>, or Place ID",
+                                )
+                                .size(12.0)
+                                .color(p.muted),
+                            );
+                        }
+
+                        if let Some(err) = &self.manual_game_err {
+                            ui.add_space(6.0);
+                            ui.add(egui::Label::new(RichText::new(err).size(12.5).color(RED)).wrap());
+                        }
+
+                        ui.add_space(14.0);
+                        let has_private = parsed
+                            .as_ref()
+                            .is_some_and(|info| info.private_server_code.is_some());
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            ui.add_enabled_ui(!self.manual_game_loading, |ui| {
+                                let play_label = if has_private {
+                                    "Join Private Server"
+                                } else {
+                                    "Play"
+                                };
+                                let play_btn = egui::Button::image_and_text(
+                                    egui::Image::new(egui::include_image!("../assets/icon_play.png"))
+                                        .fit_to_exact_size(egui::vec2(14.0, 14.0))
+                                        .tint(egui::Color32::WHITE),
+                                    RichText::new(play_label)
+                                        .size(13.0)
+                                        .strong()
+                                        .color(egui::Color32::WHITE),
+                                )
+                                .fill(GREEN)
+                                .corner_radius(10)
+                                .min_size(egui::vec2(0.0, 34.0));
+                                if ui.add(play_btn).clicked() {
+                                    trigger_intent = Some(ManualGameIntent::Play);
+                                }
+
+                                let fav_btn = egui::Button::image_and_text(
+                                    egui::Image::new(egui::include_image!(
+                                        "../assets/icon_bookmark.png"
+                                    ))
+                                    .fit_to_exact_size(egui::vec2(13.0, 13.0))
+                                    .tint(p.muted),
+                                    RichText::new("Put in Favorites")
+                                        .size(13.0)
+                                        .strong()
+                                        .color(p.text),
+                                )
+                                .fill(p.surface_bg)
+                                .stroke(egui::Stroke::new(1.0, p.border))
+                                .corner_radius(10)
+                                .min_size(egui::vec2(0.0, 34.0));
+                                if ui.add(fav_btn).clicked() {
+                                    trigger_intent = Some(ManualGameIntent::Favorite);
+                                }
+
+                                let open_btn = egui::Button::new(
+                                    RichText::new("Open Page")
+                                        .size(13.0)
+                                        .strong()
+                                        .color(p.text),
+                                )
+                                .fill(p.surface_bg)
+                                .stroke(egui::Stroke::new(1.0, p.border))
+                                .corner_radius(10)
+                                .min_size(egui::vec2(0.0, 34.0));
+                                if ui.add(open_btn).clicked() {
+                                    trigger_intent = Some(ManualGameIntent::Open);
+                                }
+                            });
+                            if self.manual_game_loading {
+                                ui.add_space(4.0);
+                                ui.spinner();
+                            }
+                        });
+                    });
+            });
+
+        if close_modal {
+            self.manual_game_open = false;
+            self.manual_game_err = None;
+        } else if let Some(intent) = trigger_intent {
+            self.start_manual_game_lookup(intent);
         }
     }
 
@@ -2767,8 +3064,12 @@ impl eframe::App for RustBlox {
 
                     if logged_in {
                         ui.add_space(20.0);
-                        let search_w = (ui.available_width() - 330.0).clamp(180.0, 440.0);
-                        let search_pad = ((ui.available_width() - 310.0 - search_w) * 0.5).max(8.0);
+                        let url_btn_reserve = 106.0;
+                        let search_w =
+                            (ui.available_width() - 330.0 - url_btn_reserve).clamp(160.0, 400.0);
+                        let search_pad =
+                            ((ui.available_width() - 310.0 - search_w - url_btn_reserve) * 0.5)
+                                .max(8.0);
                         ui.add_space(search_pad);
 
                         egui::Frame::new()
@@ -2790,7 +3091,7 @@ impl eframe::App for RustBlox {
                                     let r = ui.add(
                                         egui::TextEdit::singleline(&mut self.search)
                                             .frame(egui::Frame::NONE)
-                                            .hint_text("Search")
+                                            .hint_text("Search games, Place ID, or link")
                                             .desired_width(edit_w),
                                     );
                                     if r.lost_focus()
@@ -2813,6 +3114,26 @@ impl eframe::App for RustBlox {
                                     }
                                 });
                             });
+                        ui.add_space(8.0);
+                        let url_btn = egui::Button::new(
+                            RichText::new("+ Game URL")
+                                .size(12.5)
+                                .strong()
+                                .color(p.text),
+                        )
+                        .fill(p.surface_bg)
+                        .stroke(egui::Stroke::new(1.2, p.text_border))
+                        .corner_radius(18)
+                        .min_size(egui::vec2(0.0, 30.0));
+                        if ui
+                            .add(url_btn)
+                            .on_hover_text(
+                                "Manually open, play, or add a Roblox game by URL link or Place ID",
+                            )
+                            .clicked()
+                        {
+                            acts.push(Action::OpenManualGame);
+                        }
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3166,6 +3487,9 @@ impl eframe::App for RustBlox {
             self.sync_auth_session(true);
         }
 
+        if logged_in {
+            self.render_manual_game_modal(ui.ctx());
+        }
         self.render_notifications(ui.ctx(), &mut acts);
 
         let hovered_game = acts.iter().find_map(|a| {
@@ -3512,7 +3836,16 @@ impl eframe::App for RustBlox {
                         self.sync_sorts(false);
                     }
                 }
-                Action::Open(g) => self.open_game_details(g),
+                Action::Open(g) => {
+                    if self
+                        .active_private_server
+                        .as_ref()
+                        .is_some_and(|(uid, _, _)| *uid != g.universe_id)
+                    {
+                        self.active_private_server = None;
+                    }
+                    self.open_game_details(g);
+                }
                 Action::SelectGameTab(tab) => {
                     self.game_tab = tab;
                     if let Page::Game(g) = &self.page {
@@ -3737,6 +4070,25 @@ impl eframe::App for RustBlox {
                     self.status = "Joining friend...".to_string();
                     self.record_recent_place_id(pid);
                     self.launch_place_id(pid);
+                }
+                Action::JoinPrivateServer(pid, code) => {
+                    self.status = "Joining private server...".to_string();
+                    if let Page::Game(g) = &self.page {
+                        if g.place_id == pid {
+                            self.record_recent_game(g.clone());
+                        } else {
+                            self.record_recent_place_id(pid);
+                        }
+                    } else {
+                        self.record_recent_place_id(pid);
+                    }
+                    self.launch_private_server(pid, code);
+                }
+                Action::OpenManualGame => {
+                    self.manual_game_open = true;
+                    self.manual_game_err = None;
+                    self.manual_game_loading = false;
+                    self.manual_game_focus_requested = true;
                 }
                 Action::ToggleFav(g) => self.toggle_fav(&g),
             }

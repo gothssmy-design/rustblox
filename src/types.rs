@@ -94,6 +94,20 @@ pub struct Sort {
     pub games: Vec<Game>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ResolvedGameLink {
+    pub game: Game,
+    pub place_id: u64,
+    pub private_server_code: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ManualGameIntent {
+    Open,
+    Favorite,
+    Play,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GameTab {
     About,
@@ -626,6 +640,8 @@ pub enum Action {
     DeclineFriendRequest(u64, String),
     Play(Game),
     JoinPlace(u64),
+    JoinPrivateServer(u64, String),
+    OpenManualGame,
     ToggleFav(Game),
     SelectGameTab(GameTab),
     GameMediaStep(i32),
@@ -662,7 +678,11 @@ pub enum Action {
 pub enum Msg {
     Sorts(Result<Vec<Sort>, String>),
     Search(String, Result<Vec<Game>, String>),
-    Lookup(Result<Game, String>),
+    Lookup(Result<ResolvedGameLink, String>),
+    ManualGameLookup {
+        intent: ManualGameIntent,
+        result: Result<ResolvedGameLink, String>,
+    },
     Details(Option<Game>),
     SavedSynced(SavedSyncData),
     RecentPlaceResolved(Game),

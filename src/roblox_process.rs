@@ -576,13 +576,51 @@ pub fn launch_from_uri(uri: &str, preclean_tray: bool) -> Result<(), String> {
     Ok(())
 }
 
+pub fn build_place_launcher_url(
+    place_id: u64,
+    job_id: Option<&str>,
+    private_server_code: Option<&str>,
+) -> String {
+    if let Some(code) = private_server_code.map(str::trim).filter(|s| !s.is_empty()) {
+        return format!(
+            "https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestPrivateGame&browserTrackerId=0&placeId={place_id}&linkCode={}&isPlayTogetherGame=false",
+            enc(code)
+        );
+    }
+    if let Some(jid) = job_id.map(str::trim).filter(|s| !s.is_empty()) {
+        return format!(
+            "https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestGameJob&browserTrackerId=0&placeId={place_id}&gameId={jid}&isPlayTogetherGame=false"
+        );
+    }
+    format!(
+        "https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestGame&browserTrackerId=0&placeId={place_id}&isPlayTogetherGame=false"
+    )
+}
+
 pub fn launch_authenticated(place_id: u64, cookie: &str) -> Result<String, String> {
-    launch_authenticated_server(place_id, None, cookie)
+    launch_authenticated_target(place_id, None, None, cookie)
 }
 
 pub fn launch_authenticated_server(
     place_id: u64,
     job_id: Option<&str>,
+    cookie: &str,
+) -> Result<String, String> {
+    launch_authenticated_target(place_id, job_id, None, cookie)
+}
+
+pub fn launch_authenticated_private_server(
+    place_id: u64,
+    link_code: &str,
+    cookie: &str,
+) -> Result<String, String> {
+    launch_authenticated_target(place_id, None, Some(link_code), cookie)
+}
+
+fn launch_authenticated_target(
+    place_id: u64,
+    job_id: Option<&str>,
+    private_server_code: Option<&str>,
     cookie: &str,
 ) -> Result<String, String> {
     let resp = post_csrf(
@@ -598,21 +636,16 @@ pub fn launch_authenticated_server(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let launcher_url = match job_id {
-        Some(jid) if !jid.is_empty() => format!(
-            "https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestGameJob&browserTrackerId=0&placeId={place_id}&gameId={jid}&isPlayTogetherGame=false"
-        ),
-        _ => format!(
-            "https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestGame&browserTrackerId=0&placeId={place_id}&isPlayTogetherGame=false"
-        ),
-    };
+    let launcher_url = build_place_launcher_url(place_id, job_id, private_server_code);
     let uri = format!(
         "roblox-player:1+launchmode:play+gameinfo:{ticket}+launchtime:{ms}+placelauncherurl:{}+robloxLocale:en_us+gameLocale:en_us",
         enc(&launcher_url)
     );
     let _ = crate::fastflags::sync_saved_fastflags_before_launch();
     launch_from_uri(&uri, true)?;
-    Ok(if job_id.is_some() {
+    Ok(if private_server_code.is_some_and(|s| !s.trim().is_empty()) {
+        "Joining private server...".to_string()
+    } else if job_id.is_some_and(|s| !s.trim().is_empty()) {
         "Joining selected server...".to_string()
     } else {
         "Launching Roblox (signed in)...".to_string()

@@ -10,8 +10,8 @@ use serde_json::Value;
 
 use crate::types::{
     AvatarAsset, AvatarScales, AvatarState, AvatarTab, BodyColors, FriendProfile, Game, GameExtra,
-    GamePassItem, Msg, OmniHome, OutfitItem, PaletteColor, PlayerBadge, Profile, SavedSyncData,
-    ServerItem, Sort, User, UserSearchPage,
+    GamePassItem, Msg, OmniHome, OutfitItem, PaletteColor, PlayerBadge, Profile,
+    ResolvedGameLink, SavedSyncData, ServerItem, Sort, User, UserSearchPage,
 };
 use crate::video_preview;
 
@@ -487,6 +487,318 @@ pub fn universe_of_place(place: u64) -> Option<u64> {
 pub fn games_by_places(places: &[u64]) -> Vec<Game> {
     let unis: Vec<u64> = places.iter().filter_map(|p| universe_of_place(*p)).collect();
     games_by_universe(&unis)
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ParsedGameLink {
+    pub place_id: Option<u64>,
+    pub private_server_code: Option<String>,
+    pub share_code: Option<String>,
+    pub share_type: Option<String>,
+}
+
+fn url_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(b) = u8::from_str_radix(hex, 16) {
+                    out.push(b);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        if bytes[i] == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(bytes[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn extract_query_pairs(query: &str) -> Vec<(String, String)> {
+    query
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| {
+            let (k, v) = part.split_once('=')?;
+            Some((
+                url_decode(k).trim().to_ascii_lowercase(),
+                url_decode(v).trim().to_string(),
+            ))
+        })
+        .collect()
+}
+
+fn trim_link_wrappers(raw: &str) -> &str {
+    let mut s = raw.trim();
+    loop {
+        let next = s
+            .strip_prefix('<')
+            .and_then(|v| v.strip_suffix('>'))
+            .or_else(|| s.strip_prefix('"').and_then(|v| v.strip_suffix('"')))
+            .or_else(|| s.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')));
+        match next {
+            Some(inner) => s = inner.trim(),
+            None => return s,
+        }
+    }
+}
+
+fn is_supported_roblox_link(s: &str) -> bool {
+    if s.is_empty() || s.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let lower = s.to_ascii_lowercase();
+    if lower.starts_with("roblox://") || lower.starts_with("roblox-player:") {
+        return true;
+    }
+    let without_scheme = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+        .unwrap_or(&lower);
+    let host = without_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    host == "roblox.com"
+        || host.ends_with(".roblox.com")
+        || host == "ro.blox.com"
+        || host.ends_with(".ro.blox.com")
+}
+
+pub fn parse_game_link(input: &str) -> Option<ParsedGameLink> {
+    let cleaned = trim_link_wrappers(input);
+    if cleaned.is_empty() {
+        return None;
+    }
+    if let Ok(place_id) = cleaned.parse::<u64>() {
+        return (place_id > 0).then(|| ParsedGameLink {
+            place_id: Some(place_id),
+            ..Default::default()
+        });
+    }
+    if !is_supported_roblox_link(cleaned) {
+        return None;
+    }
+
+    let lower = cleaned.to_ascii_lowercase();
+    if lower.starts_with("roblox-player:") {
+        for part in cleaned.split('+') {
+            if let Some((k, v)) = part.split_once(':') {
+                if k.eq_ignore_ascii_case("placelauncherurl") {
+                    let decoded = url_decode(v);
+                    if let Some(parsed) = parse_game_link(&decoded) {
+                        return Some(parsed);
+                    }
+                }
+            }
+        }
+        return None;
+    }
+
+    let before_frag = cleaned.split('#').next().unwrap_or(cleaned);
+    let (path_part, query_opt) = before_frag
+        .split_once('?')
+        .map_or((before_frag, None), |(p, q)| (p, Some(q)));
+
+    let mut out = ParsedGameLink::default();
+    let mut query_sources: Vec<&str> = Vec::new();
+    let mut is_share_path = false;
+
+    if let Some(after_scheme) = lower.strip_prefix("roblox://") {
+        let orig_after = &path_part[cleaned.len().min("roblox://".len())..];
+        if !orig_after.contains('/') && orig_after.contains('=') {
+            query_sources.push(orig_after);
+        } else if after_scheme == "share" || after_scheme.ends_with("/share") {
+            is_share_path = true;
+        }
+    } else {
+        let after_scheme = path_part
+            .strip_prefix("https://")
+            .or_else(|| path_part.strip_prefix("http://"))
+            .or_else(|| path_part.strip_prefix("HTTPS://"))
+            .or_else(|| path_part.strip_prefix("HTTP://"))
+            .unwrap_or(path_part);
+        if let Some((_, rel_path)) = after_scheme.split_once('/') {
+            let segs: Vec<&str> = rel_path.split('/').filter(|s| !s.is_empty()).collect();
+            for (idx, seg) in segs.iter().enumerate() {
+                if seg.eq_ignore_ascii_case("games") {
+                    if let Some(id) = segs
+                        .get(idx + 1)
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .filter(|&id| id > 0)
+                    {
+                        out.place_id = Some(id);
+                    }
+                } else if seg.eq_ignore_ascii_case("share")
+                    || seg.eq_ignore_ascii_case("share-links")
+                {
+                    is_share_path = true;
+                }
+            }
+        }
+    }
+
+    if let Some(q) = query_opt {
+        query_sources.push(q);
+    }
+
+    for q in query_sources {
+        for (k, v) in extract_query_pairs(q) {
+            if v.is_empty() {
+                continue;
+            }
+            match k.as_str() {
+                "placeid" => {
+                    if let Ok(id) = v.parse::<u64>() {
+                        if id > 0 {
+                            out.place_id = Some(id);
+                        }
+                    }
+                }
+                "privateserverlinkcode" | "linkcode" => {
+                    out.private_server_code = Some(v);
+                }
+                "code" if is_share_path => {
+                    out.share_code = Some(v);
+                }
+                "type" if is_share_path => {
+                    out.share_type = Some(v);
+                }
+                "af_dp" | "af_web_dp" => {
+                    if out.place_id.is_none() {
+                        if let Some(nested) = parse_game_link(&v) {
+                            out.place_id = nested.place_id;
+                            if out.private_server_code.is_none() {
+                                out.private_server_code = nested.private_server_code;
+                            }
+                            if out.share_code.is_none() {
+                                out.share_code = nested.share_code;
+                                out.share_type = nested.share_type;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if out.place_id.is_some() || out.share_code.is_some() {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+fn extract_share_link_target(v: &Value) -> Option<(u64, Option<u64>, Option<String>)> {
+    for key in [
+        "privateServerInviteData",
+        "experienceInviteData",
+        "experienceDetailsInviteData",
+        "notificationExperienceInviteData",
+    ] {
+        let data = &v[key];
+        if data.is_null() {
+            continue;
+        }
+        let place_id = data["placeId"].as_u64().filter(|&id| id > 0).unwrap_or(0);
+        let universe_id = data["universeId"].as_u64().filter(|&id| id > 0);
+        let link_code = data["linkCode"]
+            .as_str()
+            .or_else(|| data["privateServerLinkCode"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if place_id > 0 || universe_id.is_some() {
+            return Some((place_id, universe_id, link_code));
+        }
+    }
+    None
+}
+
+fn resolve_share_link(
+    code: &str,
+    share_type: Option<&str>,
+    cookie: Option<&str>,
+) -> Result<(u64, Option<u64>, Option<String>), String> {
+    let mut candidate_types: Vec<&str> = Vec::new();
+    if let Some(t) = share_type.map(str::trim).filter(|s| !s.is_empty()) {
+        candidate_types.push(t);
+    }
+    for fallback in ["Server", "ExperienceInvite", "ExperienceDetails"] {
+        if !candidate_types
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(fallback))
+        {
+            candidate_types.push(fallback);
+        }
+    }
+
+    for link_type in candidate_types {
+        if let Ok(resp) = post_csrf(
+            "https://apis.roblox.com/sharelinks/v1/resolve-link",
+            serde_json::json!({
+                "linkId": code,
+                "linkType": link_type,
+            }),
+            cookie,
+            Some("https://www.roblox.com/"),
+        ) {
+            if let Ok(v) = resp.into_json::<Value>() {
+                if let Some(target) = extract_share_link_target(&v) {
+                    return Ok(target);
+                }
+            }
+        }
+    }
+
+    Err(
+        "Could not resolve that Roblox share link. Try pasting the full roblox.com/games/<id>/... URL or Place ID."
+            .to_string(),
+    )
+}
+
+pub fn resolve_game_link(input: &str, cookie: Option<&str>) -> Result<ResolvedGameLink, String> {
+    let parsed = parse_game_link(input).ok_or_else(|| {
+        "Enter a valid Roblox game URL or numeric Place ID (e.g. https://www.roblox.com/games/1818/...)."
+            .to_string()
+    })?;
+
+    let mut place_id = parsed.place_id.unwrap_or(0);
+    let mut universe_id = None;
+    let mut private_server_code = parsed.private_server_code;
+
+    if place_id == 0 {
+        if let Some(code) = parsed.share_code.as_deref() {
+            let (pid, uid, scode) =
+                resolve_share_link(code, parsed.share_type.as_deref(), cookie)?;
+            place_id = pid;
+            universe_id = uid;
+            if private_server_code.is_none() {
+                private_server_code = scode;
+            }
+        }
+    }
+
+    let game = if place_id > 0 {
+        games_by_places(&[place_id]).into_iter().next().or_else(|| {
+            universe_id.and_then(|uid| games_by_universe(&[uid]).into_iter().next())
+        })
+    } else {
+        universe_id.and_then(|uid| games_by_universe(&[uid]).into_iter().next())
+    }
+    .ok_or_else(|| "No Roblox game found for that URL or Place ID.".to_string())?;
+
+    let target_place_id = if place_id > 0 { place_id } else { game.place_id };
+    Ok(ResolvedGameLink {
+        game,
+        place_id: target_place_id,
+        private_server_code,
+    })
 }
 
 pub fn fetch_user_favorite_games(uid: u64, cookie: &str) -> Result<Vec<u64>, String> {
@@ -2535,5 +2847,91 @@ mod tests {
             None
         );
         assert_eq!(parse_client_version_update(&json, None), None);
+    }
+
+    #[test]
+    fn parses_roblox_game_links_and_place_ids() {
+        assert_eq!(
+            parse_game_link("1818"),
+            Some(ParsedGameLink {
+                place_id: Some(1818),
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            parse_game_link("  <https://www.roblox.com/games/2753915549/Blox-Fruits>  "),
+            Some(ParsedGameLink {
+                place_id: Some(2753915549),
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            parse_game_link("www.roblox.com/en/games/4924922222/Brookhaven-RP?privateServerLinkCode=abc_123"),
+            Some(ParsedGameLink {
+                place_id: Some(4924922222),
+                private_server_code: Some("abc_123".to_string()),
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            parse_game_link("https://web.roblox.com/games/start?placeId=1818&launchData=foo"),
+            Some(ParsedGameLink {
+                place_id: Some(1818),
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            parse_game_link("roblox://placeId=920587237"),
+            Some(ParsedGameLink {
+                place_id: Some(920587237),
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            parse_game_link("roblox://experiences/start?placeId=1818&linkCode=secret99"),
+            Some(ParsedGameLink {
+                place_id: Some(1818),
+                private_server_code: Some("secret99".to_string()),
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            parse_game_link("https://ro.blox.com/Ebh5?af_dp=roblox%3A%2F%2Fexperiences%2Fstart%3FplaceId%3D1818"),
+            Some(ParsedGameLink {
+                place_id: Some(1818),
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            parse_game_link("https://www.roblox.com/share?code=9f8e7d6c5b4a&type=Server"),
+            Some(ParsedGameLink {
+                place_id: None,
+                private_server_code: None,
+                share_code: Some("9f8e7d6c5b4a".to_string()),
+                share_type: Some("Server".to_string()),
+            })
+        );
+
+        assert_eq!(parse_game_link(""), None);
+        assert_eq!(parse_game_link("0"), None);
+        assert_eq!(parse_game_link("blox fruits"), None);
+        assert_eq!(parse_game_link("game 1818"), None);
+        assert_eq!(parse_game_link("https://example.com/games/1818"), None);
+    }
+
+    #[test]
+    fn builds_place_launcher_urls_for_public_job_and_private_links() {
+        assert_eq!(
+            crate::roblox_process::build_place_launcher_url(1818, None, None),
+            "https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestGame&browserTrackerId=0&placeId=1818&isPlayTogetherGame=false"
+        );
+        assert_eq!(
+            crate::roblox_process::build_place_launcher_url(1818, Some("job-1"), None),
+            "https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestGameJob&browserTrackerId=0&placeId=1818&gameId=job-1&isPlayTogetherGame=false"
+        );
+        assert_eq!(
+            crate::roblox_process::build_place_launcher_url(1818, None, Some("vip+1")),
+            "https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestPrivateGame&browserTrackerId=0&placeId=1818&linkCode=vip%2B1&isPlayTogetherGame=false"
+        );
     }
 }

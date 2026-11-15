@@ -134,17 +134,41 @@ impl RustBlox {
             section(ui, "Continue");
             icon_row(ui, "continue", &self.recent, &self.icon, self.current_card_preview(), acts);
         }
-        if !self.favs.is_empty() {
-            ui.add_space(16.0);
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::Image::new(egui::include_image!("../../assets/icon_bookmark.png"))
-                        .fit_to_exact_size(egui::vec2(15.0, 15.0))
-                        .tint(pal(ui).text),
-                );
-                ui.label(RichText::new("Favorites").size(20.0).strong());
-            });
+        ui.add_space(16.0);
+        ui.horizontal(|ui| {
+            let p = pal(ui);
+            ui.add(
+                egui::Image::new(egui::include_image!("../../assets/icon_bookmark.png"))
+                    .fit_to_exact_size(egui::vec2(15.0, 15.0))
+                    .tint(p.text),
+            );
+            ui.label(RichText::new("Favorites").size(20.0).strong());
             ui.add_space(8.0);
+            let add_btn = egui::Button::new(
+                RichText::new("+ Add URL")
+                    .size(12.0)
+                    .strong()
+                    .color(p.text),
+            )
+            .fill(p.surface_bg)
+            .stroke(egui::Stroke::new(1.0, p.border))
+            .corner_radius(14);
+            if ui
+                .add(add_btn)
+                .on_hover_text("Open, play, or pin a Roblox game manually by URL link or Place ID")
+                .clicked()
+            {
+                acts.push(Action::OpenManualGame);
+            }
+        });
+        ui.add_space(8.0);
+        if self.favs.is_empty() {
+            ui.label(
+                RichText::new("No favorites yet — click + Add URL to pin a game link here.")
+                    .size(13.0)
+                    .color(pal(ui).muted),
+            );
+        } else {
             icon_row(ui, "favorites", &self.favs, &self.icon, self.current_card_preview(), acts);
         }
 

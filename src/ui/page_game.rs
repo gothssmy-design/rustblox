@@ -191,6 +191,26 @@ impl RustBlox {
                                     }
                                 },
                             );
+                            if let Some((_, ps_pid, ps_code)) = self
+                                .active_private_server
+                                .as_ref()
+                                .filter(|(uid, _, _)| *uid == g.universe_id)
+                            {
+                                ui.add_space(6.0);
+                                let ps_btn = egui::Button::new(
+                                    RichText::new("Join Private Server Link")
+                                        .size(13.0)
+                                        .strong()
+                                        .color(p.text),
+                                )
+                                .fill(p.surface_bg)
+                                .stroke(egui::Stroke::new(1.0, accent_color(ui)))
+                                .corner_radius(8)
+                                .min_size(egui::vec2(card_inner, 32.0));
+                                if ui.add(ps_btn).clicked() {
+                                    acts.push(Action::JoinPrivateServer(*ps_pid, ps_code.clone()));
+                                }
+                            }
                             ui.add_space(10.0);
 
                             // Action & Vote strip (Favorite + Upvote/Downvote + Ratio Bar)
