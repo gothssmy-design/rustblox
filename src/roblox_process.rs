@@ -324,9 +324,23 @@ pub fn inspect_player_log_text(text: &str, total_len: u64) -> (LogSessionState, 
     (state, is_handoff)
 }
 
-pub fn inspect_player_log(path: &Path) -> (LogSessionState, bool) {
+pub fn extract_active_place_id_from_log(text: &str) -> Option<u64> {
+    let idx = text.rfind("! Joining game ")?;
+    let line = &text[idx..];
+    let first_line = line.lines().next().unwrap_or(line);
+    let place_kw = first_line.find(" place ")?;
+    let after_place = &first_line[place_kw + " place ".len()..];
+    let digits: String = after_place
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse::<u64>().ok().filter(|&id| id > 0)
+}
+
+pub fn inspect_player_log_session(path: &Path) -> (LogSessionState, bool, Option<u64>) {
     let Ok(mut f) = fs::File::open(path) else {
-        return (LogSessionState::Unknown, false);
+        return (LogSessionState::Unknown, false, None);
     };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
     const MAX_TAIL: u64 = 512 * 1024;
@@ -335,10 +349,21 @@ pub fn inspect_player_log(path: &Path) -> (LogSessionState, bool) {
     }
     let mut buf = Vec::with_capacity(len.min(MAX_TAIL) as usize);
     if f.read_to_end(&mut buf).is_err() {
-        return (LogSessionState::Unknown, false);
+        return (LogSessionState::Unknown, false, None);
     }
     let text = String::from_utf8_lossy(&buf);
-    inspect_player_log_text(&text, len)
+    let (state, is_handoff) = inspect_player_log_text(&text, len);
+    let place_id = if state == LogSessionState::Playing {
+        extract_active_place_id_from_log(&text)
+    } else {
+        None
+    };
+    (state, is_handoff, place_id)
+}
+
+pub fn inspect_player_log(path: &Path) -> (LogSessionState, bool) {
+    let (state, is_handoff, _) = inspect_player_log_session(path);
+    (state, is_handoff)
 }
 
 pub fn roblox_logs_dir() -> Option<PathBuf> {
@@ -445,6 +470,7 @@ pub fn start_roblox_watcher(
         let mut recently_closed: HashMap<u32, Instant> = HashMap::new();
         let mut reported_pids: HashSet<u32> = HashSet::new();
         let mut notified_kill_pids: HashSet<u32> = HashSet::new();
+        let mut last_sent_session: Option<Option<u64>> = None;
         while !stop.load(Ordering::Relaxed) {
             let auto_close = enabled.load(Ordering::Relaxed);
             if !auto_close {
@@ -456,6 +482,11 @@ pub fn start_roblox_watcher(
                 reported_pids.clear();
                 notified_kill_pids.clear();
                 recently_closed.retain(|_, t| t.elapsed() < Duration::from_secs(10));
+                if last_sent_session != Some(None) {
+                    last_sent_session = Some(None);
+                    let _ = tx.send(Msg::RobloxSessionUpdated(None));
+                    ctx.request_repaint();
+                }
                 thread::sleep(Duration::from_millis(if auto_close { 1000 } else { 1500 }));
                 continue;
             }
@@ -469,6 +500,7 @@ pub fn start_roblox_watcher(
             recently_closed.retain(|pid, t| active_pids.contains(pid) && t.elapsed() < Duration::from_secs(10));
 
             let logs_dir = roblox_logs_dir();
+            let mut active_playing_place: Option<u64> = None;
             for p in procs {
                 if recently_closed.contains_key(&p.pid) {
                     continue;
@@ -492,8 +524,9 @@ pub fn start_roblox_watcher(
                     continue;
                 }
 
-                let log_state = find_player_log_for_proc(&p, &crash_logs, logs_dir.as_deref())
-                    .map(|log| inspect_player_log(&log));
+                let log_session = find_player_log_for_proc(&p, &crash_logs, logs_dir.as_deref())
+                    .map(|log| inspect_player_log_session(&log));
+                let log_state = log_session.map(|(st, handoff, _)| (st, handoff));
 
                 let explicit_app = !lower.is_empty()
                     && (lower.contains("--app") || lower.contains("launchmode:app"))
@@ -501,6 +534,14 @@ pub fn start_roblox_watcher(
                     && !lower.contains("placelauncher");
 
                 let is_playing = matches!(log_state, Some((LogSessionState::Playing, _)));
+                if is_playing {
+                    let parsed_pid = log_session.and_then(|(_, _, pid)| pid);
+                    active_playing_place = Some(match (active_playing_place, parsed_pid) {
+                        (_, Some(pid)) if pid > 0 => pid,
+                        (Some(prev), _) => prev,
+                        _ => 0,
+                    });
+                }
 
                 let should_close = if auto_close {
                     match log_state {
@@ -555,6 +596,11 @@ pub fn start_roblox_watcher(
                     });
                     ctx.request_repaint();
                 }
+            }
+            if last_sent_session != Some(active_playing_place) {
+                last_sent_session = Some(active_playing_place);
+                let _ = tx.send(Msg::RobloxSessionUpdated(active_playing_place));
+                ctx.request_repaint();
             }
             thread::sleep(Duration::from_millis(if auto_close { 500 } else { 1500 }));
         }

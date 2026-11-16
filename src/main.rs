@@ -4,10 +4,12 @@ mod api;
 mod app;
 mod auth;
 mod avatar_3d;
+mod discord_rpc;
 mod fastflags;
 mod roblox_process;
 mod telemetry;
 mod theme;
+mod tray;
 mod types;
 mod ui;
 mod updater;
@@ -40,9 +42,18 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    let boot_settings = auth::load_settings();
+    let start_in_tray = tray::should_start_in_tray(&args, boot_settings.tray_enabled);
+    if !start_in_tray && boot_settings.tray_enabled && tray::try_focus_existing_instance() {
+        return Ok(());
+    }
+
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1200.0, 780.0])
         .with_min_inner_size([760.0, 520.0]);
+    if start_in_tray {
+        viewport = viewport.with_visible(false);
+    }
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../assets/logo.png")) {
         viewport = viewport.with_icon(icon);
     }
@@ -53,9 +64,9 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "rustblox",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(RustBlox::new(cc)))
+            Ok(Box::new(RustBlox::new(cc, start_in_tray)))
         }),
     )
 }
@@ -64,7 +75,8 @@ fn main() -> eframe::Result<()> {
 mod tests {
     use std::path::PathBuf;
     use crate::roblox_process::{
-        inspect_player_log_text, parse_crash_handler_attachment, LogSessionState,
+        extract_active_place_id_from_log, inspect_player_log_text, parse_crash_handler_attachment,
+        LogSessionState,
     };
 
     #[test]
@@ -115,5 +127,13 @@ mod tests {
             inspect_player_log_text(app_only, app_only.len() as u64),
             (LogSessionState::AppOnly, false)
         );
+    }
+
+    #[test]
+    fn extracts_latest_joined_place_id_from_player_log() {
+        let log = "2026-06-16T12:28:19Z,28.4,a9,6 [FLog::Output] ! Joining game 'cf9da149-3ee6' place 1818 at 128.116.1.1\n\
+                   2026-06-16T12:35:00Z,42.1,b1,6 [FLog::Output] ! Joining game '11111111-2222' place 2753915549 at 128.116.2.2";
+        assert_eq!(extract_active_place_id_from_log(log), Some(2753915549));
+        assert_eq!(extract_active_place_id_from_log("random text"), None);
     }
 }

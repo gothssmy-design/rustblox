@@ -108,6 +108,50 @@ pub fn load_settings() -> Settings {
         games_border_color: read_opt_rgb(&v, "games_border_color"),
         text_border_color: read_opt_rgb(&v, "text_border_color"),
         target_fps: v["target_fps"].as_u64().and_then(|n| u32::try_from(n).ok()),
+        ram_limit_mb: v["ram_limit_mb"]
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .map(|n| n.clamp(128, 4096)),
+        cpu_limit_pct: v["cpu_limit_pct"]
+            .as_u64()
+            .and_then(|n| u8::try_from(n).ok())
+            .map(|n| n.clamp(10, 100))
+            .filter(|&p| p < 100),
+        glass_edition: v["glass_edition"].as_bool().unwrap_or(def.glass_edition),
+        glass_opacity: v["glass_opacity"]
+            .as_f64()
+            .map(|f| (f as f32).clamp(0.20, 0.92))
+            .unwrap_or(def.glass_opacity),
+        glass_highlight: v["glass_highlight"]
+            .as_f64()
+            .map(|f| (f as f32).clamp(0.0, 1.0))
+            .unwrap_or(def.glass_highlight),
+        corner_roundness: v["corner_roundness"]
+            .as_u64()
+            .and_then(|n| u8::try_from(n).ok())
+            .map(|n| n.clamp(6, 22))
+            .unwrap_or(def.corner_roundness),
+        discord_rpc_enabled: v["discord_rpc_enabled"]
+            .as_bool()
+            .unwrap_or(def.discord_rpc_enabled),
+        discord_rpc_show_idle: v["discord_rpc_show_idle"]
+            .as_bool()
+            .unwrap_or(def.discord_rpc_show_idle),
+        discord_rpc_app_id: v["discord_rpc_app_id"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        tray_enabled: v["tray_enabled"].as_bool().unwrap_or(def.tray_enabled),
+        tray_minimize_on_close: v["tray_minimize_on_close"]
+            .as_bool()
+            .unwrap_or(def.tray_minimize_on_close),
+        start_with_windows: v["start_with_windows"]
+            .as_bool()
+            .unwrap_or(def.start_with_windows),
+        start_minimized_to_tray: v["start_minimized_to_tray"]
+            .as_bool()
+            .unwrap_or(def.start_minimized_to_tray),
         auto_close_roblox: v["auto_close_roblox"].as_bool().unwrap_or(true),
         notifications_silent: v["notifications_silent"].as_bool().unwrap_or(false),
         auto_check_updates: v["auto_check_updates"].as_bool().unwrap_or(true),
@@ -139,6 +183,19 @@ pub fn save_settings(s: &Settings) {
         "games_border_color": opt_rgb_json(s.games_border_color),
         "text_border_color": opt_rgb_json(s.text_border_color),
         "target_fps": s.target_fps,
+        "ram_limit_mb": s.ram_limit_mb,
+        "cpu_limit_pct": s.cpu_limit_pct,
+        "glass_edition": s.glass_edition,
+        "glass_opacity": s.glass_opacity,
+        "glass_highlight": s.glass_highlight,
+        "corner_roundness": s.corner_roundness,
+        "discord_rpc_enabled": s.discord_rpc_enabled,
+        "discord_rpc_show_idle": s.discord_rpc_show_idle,
+        "discord_rpc_app_id": s.discord_rpc_app_id,
+        "tray_enabled": s.tray_enabled,
+        "tray_minimize_on_close": s.tray_minimize_on_close,
+        "start_with_windows": s.start_with_windows,
+        "start_minimized_to_tray": s.start_minimized_to_tray,
         "auto_close_roblox": s.auto_close_roblox,
         "notifications_silent": s.notifications_silent,
         "auto_check_updates": s.auto_check_updates,

@@ -25,6 +25,9 @@ pub struct Palette {
     pub extreme_bg: Color32,
     pub widget_inactive: Color32,
     pub widget_hovered: Color32,
+    pub glass_edition: bool,
+    pub glass_highlight: f32,
+    pub corner_radius: u8,
 }
 
 fn mix_color(a: Color32, b: [u8; 3], t: f32, alpha: u8) -> Color32 {
@@ -79,6 +82,9 @@ impl Palette {
                 extreme_bg: Color32::from_rgb(26, 29, 36),
                 widget_inactive: Color32::from_rgb(40, 45, 55),
                 widget_hovered: Color32::from_rgb(56, 62, 75),
+                glass_edition: false,
+                glass_highlight: 0.0,
+                corner_radius: 12,
             }
         } else {
             let border = Color32::from_rgb(220, 224, 232);
@@ -102,6 +108,9 @@ impl Palette {
                 extreme_bg: Color32::from_rgb(241, 243, 245),
                 widget_inactive: Color32::from_rgb(235, 238, 241),
                 widget_hovered: Color32::from_rgb(222, 226, 230),
+                glass_edition: false,
+                glass_highlight: 0.0,
+                corner_radius: 12,
             }
         }
     }
@@ -110,6 +119,7 @@ impl Palette {
         let dark = effective_dark_mode(settings);
         let text = effective_text_color(settings);
         let custom_bg = settings.bg_mode != BgMode::ThemeDefault;
+        let radius = settings.corner_roundness.clamp(6, 22);
         let muted = Color32::from_rgba_unmultiplied(
             text.r(),
             text.g(),
@@ -178,6 +188,9 @@ impl Palette {
                 extreme_bg,
                 widget_inactive,
                 widget_hovered,
+                glass_edition: false,
+                glass_highlight: 0.0,
+                corner_radius: radius,
             }
         } else if dark {
             let border = Color32::from_rgba_unmultiplied(255, 255, 255, 42);
@@ -201,6 +214,9 @@ impl Palette {
                 extreme_bg: Color32::from_rgba_unmultiplied(14, 17, 24, 210),
                 widget_inactive: Color32::from_rgba_unmultiplied(255, 255, 255, 28),
                 widget_hovered: Color32::from_rgba_unmultiplied(255, 255, 255, 46),
+                glass_edition: false,
+                glass_highlight: 0.0,
+                corner_radius: radius,
             }
         } else {
             let border = Color32::from_rgba_unmultiplied(16, 19, 26, 42);
@@ -224,8 +240,97 @@ impl Palette {
                 extreme_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 220),
                 widget_inactive: Color32::from_rgba_unmultiplied(16, 19, 26, 18),
                 widget_hovered: Color32::from_rgba_unmultiplied(16, 19, 26, 34),
+                glass_edition: false,
+                glass_highlight: 0.0,
+                corner_radius: radius,
             }
         };
+
+        if settings.glass_edition {
+            let opacity = settings.glass_opacity.clamp(0.20, 0.92);
+            let highlight = settings.glass_highlight.clamp(0.0, 1.0);
+            let card_alpha = (opacity * 165.0 + 38.0).round().clamp(52.0, 224.0) as u8;
+            let surf_alpha = (opacity * 92.0 + 24.0).round().clamp(26.0, 136.0) as u8;
+            let rim_alpha = (58.0 + highlight * 118.0).round().clamp(36.0, 200.0) as u8;
+
+            if dark {
+                let card_base = if settings.bg_mode == BgMode::SolidColor {
+                    mix_color(Color32::from_rgb(20, 22, 28), settings.bg_color, 0.16, card_alpha)
+                } else {
+                    Color32::from_rgba_unmultiplied(26, 28, 34, card_alpha)
+                };
+                p.card_bg = card_base;
+                p.surface_bg = Color32::from_rgba_unmultiplied(255, 255, 255, surf_alpha);
+                p.extreme_bg = Color32::from_rgba_unmultiplied(
+                    18,
+                    20,
+                    25,
+                    card_alpha.saturating_add(24).min(242),
+                );
+                p.selected_bg = Color32::from_rgba_unmultiplied(
+                    255,
+                    255,
+                    255,
+                    surf_alpha.saturating_add(26).min(165),
+                );
+                p.hover_bg = Color32::from_rgba_unmultiplied(
+                    255,
+                    255,
+                    255,
+                    surf_alpha.saturating_sub(6).max(20),
+                );
+                p.placeholder = Color32::from_rgba_unmultiplied(255, 255, 255, 24);
+                p.widget_inactive = p.surface_bg;
+                p.widget_hovered = Color32::from_rgba_unmultiplied(
+                    255,
+                    255,
+                    255,
+                    surf_alpha.saturating_add(28).min(170),
+                );
+            } else {
+                let card_base = if settings.bg_mode == BgMode::SolidColor {
+                    mix_color(Color32::from_rgb(255, 255, 255), settings.bg_color, 0.10, card_alpha)
+                } else {
+                    Color32::from_rgba_unmultiplied(255, 255, 255, card_alpha)
+                };
+                p.card_bg = card_base;
+                p.surface_bg =
+                    Color32::from_rgba_unmultiplied(18, 20, 26, (surf_alpha / 2).max(16));
+                p.extreme_bg = Color32::from_rgba_unmultiplied(
+                    255,
+                    255,
+                    255,
+                    card_alpha.saturating_add(20).min(242),
+                );
+                p.selected_bg = Color32::from_rgba_unmultiplied(18, 20, 26, 40);
+                p.hover_bg = Color32::from_rgba_unmultiplied(18, 20, 26, 22);
+                p.placeholder = Color32::from_rgba_unmultiplied(18, 20, 26, 26);
+                p.widget_inactive = p.surface_bg;
+                p.widget_hovered = Color32::from_rgba_unmultiplied(18, 20, 26, 44);
+            }
+            let glass_rim = if dark {
+                Color32::from_rgba_unmultiplied(255, 255, 255, rim_alpha)
+            } else {
+                mix_color(
+                    Color32::from_rgb(198, 204, 214),
+                    [255, 255, 255],
+                    highlight * 0.40,
+                    rim_alpha.saturating_add(28).min(235),
+                )
+            };
+            p.border = glass_rim;
+            p.profile_border = glass_rim;
+            p.friends_border = glass_rim;
+            p.games_border = glass_rim;
+            p.text_border = glass_rim;
+            p.profile_card_bg = p.card_bg;
+            p.friends_card_bg = p.card_bg;
+            p.glass_edition = true;
+            p.glass_highlight = highlight;
+            p.corner_radius = radius;
+        } else {
+            p.corner_radius = radius;
+        }
 
         let to_c32 = |[r, g, b]: [u8; 3]| Color32::from_rgb(r, g, b);
         if let Some(rgb) = settings.borders_color {
@@ -447,6 +552,27 @@ pub fn effective_text_color(settings: &Settings) -> Color32 {
 
 pub fn panel_chrome_fill(ui: &egui::Ui, settings: &Settings) -> Color32 {
     let dark = effective_dark_mode(settings);
+    if settings.glass_edition {
+        let alpha = (settings.glass_opacity.clamp(0.20, 0.92) * 145.0 + 36.0)
+            .round()
+            .clamp(44.0, 212.0) as u8;
+        return match settings.bg_mode {
+            BgMode::SolidColor => {
+                if dark {
+                    mix_color(Color32::from_rgb(18, 20, 25), settings.bg_color, 0.16, alpha)
+                } else {
+                    mix_color(Color32::from_rgb(255, 255, 255), settings.bg_color, 0.10, alpha)
+                }
+            }
+            BgMode::ThemeDefault | BgMode::Wallpaper => {
+                if dark {
+                    Color32::from_rgba_unmultiplied(20, 22, 27, alpha)
+                } else {
+                    Color32::from_rgba_unmultiplied(255, 255, 255, alpha)
+                }
+            }
+        };
+    }
     match settings.bg_mode {
         BgMode::ThemeDefault => pal(ui).bg,
         BgMode::SolidColor => {
@@ -464,6 +590,39 @@ pub fn panel_chrome_fill(ui: &egui::Ui, settings: &Settings) -> Color32 {
             }
         }
     }
+}
+
+pub fn paint_glass_sheen(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    radius: u8,
+    p: Palette,
+) {
+    if !p.glass_edition || p.glass_highlight <= 0.01 || rect.width() < 12.0 || rect.height() < 10.0 {
+        return;
+    }
+    let h = (rect.height() * 0.28).clamp(8.0, 26.0);
+    let band = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.top() + h));
+    let top_alpha = (18.0 * p.glass_highlight).round().clamp(4.0, 26.0) as u8;
+    painter.rect_filled(
+        band,
+        CornerRadius {
+            nw: radius,
+            ne: radius,
+            sw: 0,
+            se: 0,
+        },
+        Color32::from_rgba_unmultiplied(255, 255, 255, top_alpha),
+    );
+    let inset = (radius as f32 * 0.45).clamp(4.0, rect.width() * 0.25);
+    let rim_alpha = (55.0 + 95.0 * p.glass_highlight).round().clamp(30.0, 170.0) as u8;
+    painter.line_segment(
+        [
+            egui::pos2(rect.left() + inset, rect.top() + 0.8),
+            egui::pos2(rect.right() - inset, rect.top() + 0.8),
+        ],
+        egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, rim_alpha)),
+    );
 }
 
 fn rgb_to_hsv(rgb: [u8; 3]) -> (f32, f32, f32) {
@@ -541,8 +700,19 @@ pub fn apply_theme(ctx: &egui::Context, settings: &Settings) {
     } else {
         egui::Visuals::light()
     };
-    v.panel_fill = if custom_bg { Color32::TRANSPARENT } else { p.bg };
-    v.window_fill = if custom_bg {
+    v.panel_fill = if custom_bg {
+        Color32::TRANSPARENT
+    } else {
+        p.bg
+    };
+    v.window_fill = if settings.glass_edition {
+        Color32::from_rgba_unmultiplied(
+            p.card_bg.r(),
+            p.card_bg.g(),
+            p.card_bg.b(),
+            p.card_bg.a().saturating_add(24).min(240),
+        )
+    } else if custom_bg {
         if dark {
             mix_color(Color32::from_rgb(18, 22, 30), settings.bg_color, 0.14, 244)
         } else {
@@ -556,16 +726,24 @@ pub fn apply_theme(ctx: &egui::Context, settings: &Settings) {
     v.override_text_color = Some(text_color);
     v.text_options.font_hinting = true;
     v.text_options.subpixel_binning = false;
-    v.window_corner_radius = CornerRadius::same(12);
+    v.window_corner_radius = CornerRadius::same(p.corner_radius);
     v.window_stroke = egui::Stroke::new(1.0, p.border);
+    if settings.glass_edition {
+        v.window_shadow = egui::Shadow {
+            offset: [0, 8],
+            blur: 22,
+            spread: 0,
+            color: Color32::from_black_alpha(if dark { 86 } else { 26 }),
+        };
+    }
 
-    let r8 = CornerRadius::same(8);
+    let r8 = CornerRadius::same(p.corner_radius.saturating_sub(4).clamp(6, 16));
     v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, p.border);
     v.widgets.noninteractive.corner_radius = r8;
     v.widgets.noninteractive.fg_stroke.color = text_color;
     v.widgets.inactive.weak_bg_fill = p.widget_inactive;
     v.widgets.inactive.bg_fill = p.widget_inactive;
-    v.widgets.inactive.bg_stroke = if settings.text_border_color.is_some() {
+    v.widgets.inactive.bg_stroke = if settings.text_border_color.is_some() || settings.glass_edition {
         egui::Stroke::new(1.0, p.text_border)
     } else {
         egui::Stroke::NONE
@@ -612,7 +790,21 @@ pub fn card_frame_colored(margin: i8, fill: Color32, border: Color32) -> egui::F
 
 pub fn card_frame(ui: &egui::Ui, margin: i8) -> egui::Frame {
     let p = pal(ui);
-    card_frame_colored(margin, p.card_bg, p.border)
+    let mut frame = egui::Frame::new()
+        .fill(p.card_bg)
+        .stroke(egui::Stroke::new(1.0, p.border))
+        .corner_radius(p.corner_radius)
+        .inner_margin(margin);
+    if p.glass_edition {
+        let dark = ui.visuals().dark_mode;
+        frame = frame.shadow(egui::Shadow {
+            offset: [0, 5],
+            blur: 16,
+            spread: 0,
+            color: Color32::from_black_alpha(if dark { 58 } else { 20 }),
+        });
+    }
+    frame
 }
 
 #[cfg(test)]
@@ -668,5 +860,24 @@ mod tests {
         assert_eq!(p.text_border, Color32::from_rgb(255, 235, 130));
         // Card surface should pick up warm rose harmony
         assert!(p.card_bg.r() > p.card_bg.g());
+    }
+
+    #[test]
+    fn glass_liquid_edition_applies_neutral_glass_and_roundness() {
+        let mut s = Settings::default();
+        s.dark = true;
+        s.glass_edition = true;
+        s.glass_opacity = 0.45;
+        s.glass_highlight = 0.85;
+        s.corner_roundness = 18;
+
+        let p = Palette::from_settings(&s);
+        assert!(p.glass_edition);
+        // Keeps the normal background color untouched while making UI cards/surfaces frosted liquid glass.
+        assert_eq!(p.bg, Palette::of(true).bg);
+        assert_eq!(p.corner_radius, 18);
+        assert!(p.card_bg.a() < 200);
+        assert!(p.surface_bg.a() < 120);
+        assert!(p.border.a() > 100);
     }
 }

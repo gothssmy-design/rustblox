@@ -1,10 +1,11 @@
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind};
 
-use crate::theme::{accent_color, is_dark_color, pal, BLUE, GREEN, ORANGE, RED};
+use crate::theme::{accent_color, is_dark_color, paint_glass_sheen, pal, BLUE, GREEN, ORANGE, RED};
+use crate::types::Settings;
 
 const DOCK_WIDTH: f32 = 64.0;
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(450);
@@ -70,6 +71,13 @@ struct TelemetryState {
     anim_cpu: f32,
     rotor_phase: f32,
     show_gb_mode: bool,
+    perf_open: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TelemetryActions {
+    pub settings_changed: bool,
+    pub trim_ram_requested: bool,
 }
 
 impl Default for TelemetryState {
@@ -98,6 +106,7 @@ impl Default for TelemetryState {
             anim_cpu: 0.0,
             rotor_phase: 0.0,
             show_gb_mode: false,
+            perf_open: false,
         };
         s.refresh_os_metrics();
         s.anim_ram = s.snapshot.ram_pct;
@@ -318,6 +327,150 @@ fn read_process_memory_mb() -> Option<f32> {
 fn read_process_memory_mb() -> Option<f32> {
     None
 }
+
+pub fn current_process_ram_mb() -> Option<f32> {
+    read_process_memory_mb()
+}
+
+pub fn max_video_cache_for_ram_limit(ram_limit_mb: Option<u32>) -> usize {
+    match ram_limit_mb {
+        None => 8,
+        Some(mb) if mb <= 192 => 1,
+        Some(mb) if mb <= 320 => 2,
+        Some(mb) if mb <= 640 => 4,
+        Some(_) => 6,
+    }
+}
+
+pub fn compute_cpu_rate_param(cpu_limit_pct: Option<u8>) -> Option<u32> {
+    cpu_limit_pct
+        .map(|pct| pct.clamp(10, 100))
+        .filter(|&pct| pct < 100)
+        .map(|pct| (pct as u32) * 100)
+}
+
+#[cfg(windows)]
+pub fn trim_process_memory() -> bool {
+    use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    unsafe { K32EmptyWorkingSet(GetCurrentProcess()) != 0 }
+}
+
+#[cfg(not(windows))]
+pub fn trim_process_memory() -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn ensure_cpu_limit_job() -> Option<windows_sys::Win32::Foundation::HANDLE> {
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    static JOB_HANDLE: OnceLock<Option<isize>> = OnceLock::new();
+    let stored = *JOB_HANDLE.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return None;
+        }
+        // Allow spawned RobloxPlayerBeta.exe processes to break away uncapped.
+        let mut ext: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        ext.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+        let _ = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            (&raw const ext).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if AssignProcessToJobObject(job, GetCurrentProcess()) == 0 {
+            windows_sys::Win32::Foundation::CloseHandle(job);
+            return None;
+        }
+        Some(job as isize)
+    });
+    stored.map(|v| v as windows_sys::Win32::Foundation::HANDLE)
+}
+
+#[cfg(windows)]
+pub fn apply_resource_limits(ram_limit_mb: Option<u32>, cpu_limit_pct: Option<u8>) {
+    use windows_sys::Win32::System::JobObjects::{
+        JobObjectCpuRateControlInformation, SetInformationJobObject,
+        JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE,
+        JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
+    };
+    use windows_sys::Win32::System::Memory::{
+        SetProcessWorkingSetSizeEx, QUOTA_LIMITS_HARDWS_MAX_DISABLE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
+    };
+
+    static LAST_APPLIED: OnceLock<Mutex<Option<(Option<u32>, Option<u8>)>>> = OnceLock::new();
+    let norm_ram = ram_limit_mb.map(|mb| mb.clamp(128, 4096));
+    let norm_cpu = cpu_limit_pct.map(|p| p.clamp(10, 100)).filter(|&p| p < 100);
+    let next = (norm_ram, norm_cpu);
+
+    let cache = LAST_APPLIED.get_or_init(|| Mutex::new(None));
+    if let Ok(mut guard) = cache.lock() {
+        if *guard == Some(next) {
+            return;
+        }
+        *guard = Some(next);
+    }
+
+    unsafe {
+        let proc_h = GetCurrentProcess();
+        if let Some(mb) = norm_ram {
+            let max_ws = (mb as usize).saturating_mul(1024 * 1024);
+            let min_ws = (16 * 1024 * 1024usize).min(max_ws / 4);
+            let _ = SetProcessWorkingSetSizeEx(
+                proc_h,
+                min_ws,
+                max_ws,
+                QUOTA_LIMITS_HARDWS_MAX_DISABLE,
+            );
+            if read_process_memory_mb().is_some_and(|cur| cur > mb as f32) {
+                let _ = trim_process_memory();
+            }
+        } else {
+            let _ = SetProcessWorkingSetSizeEx(
+                proc_h,
+                usize::MAX,
+                usize::MAX,
+                QUOTA_LIMITS_HARDWS_MAX_DISABLE,
+            );
+        }
+
+        if let Some(job) = ensure_cpu_limit_job() {
+            let mut info: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = std::mem::zeroed();
+            if let Some(rate) = compute_cpu_rate_param(norm_cpu) {
+                info.ControlFlags =
+                    JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+                info.Anonymous.CpuRate = rate;
+            }
+            let _ = SetInformationJobObject(
+                job,
+                JobObjectCpuRateControlInformation,
+                (&raw const info).cast(),
+                std::mem::size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
+            );
+        }
+
+        let prio = if norm_cpu.is_some_and(|p| p <= 50) {
+            BELOW_NORMAL_PRIORITY_CLASS
+        } else {
+            NORMAL_PRIORITY_CLASS
+        };
+        let _ = SetPriorityClass(proc_h, prio);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn apply_resource_limits(_ram_limit_mb: Option<u32>, _cpu_limit_pct: Option<u8>) {}
 
 fn mix_c32(a: Color32, b: Color32, t: f32, alpha: u8) -> Color32 {
     let t = t.clamp(0.0, 1.0);
@@ -657,7 +810,8 @@ fn paint_ram_icon(painter: &egui::Painter, left_center: Pos2, color: Color32) {
     );
 }
 
-pub fn draw_sidebar_telemetry(ui: &mut egui::Ui) {
+pub fn draw_sidebar_telemetry(ui: &mut egui::Ui, settings: &mut Settings) -> TelemetryActions {
+    let mut actions = TelemetryActions::default();
     let ctx = ui.ctx().clone();
     let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
     let id = egui::Id::NULL.with("rustblox_sidebar_telemetry");
@@ -667,7 +821,7 @@ pub fn draw_sidebar_telemetry(ui: &mut egui::Ui) {
     });
 
     let now = Instant::now();
-    let (snap, anim_fps, anim_ram, anim_cpu, rotor_phase, t, fps_hist, cpu_hist, show_gb, raw_dt) = {
+    let (snap, anim_fps, anim_ram, anim_cpu, rotor_phase, t, fps_hist, cpu_hist, mut show_gb, mut perf_open, raw_dt) = {
         let mut guard = handle.0.lock().unwrap();
         let raw_dt = guard.tick(now);
         (
@@ -680,13 +834,18 @@ pub fn draw_sidebar_telemetry(ui: &mut egui::Ui) {
             guard.fps_history.clone(),
             guard.cpu_history.clone(),
             guard.show_gb_mode,
+            guard.perf_open,
             raw_dt,
         )
     };
 
-    // Pace smooth animation cleanly without pegging uncapped >500Hz setups at 100% CPU.
+    // Pace smooth animation cleanly and honor low CPU limiter targets.
     if minimized {
         ctx.request_repaint_after(Duration::from_millis(500));
+    } else if settings.cpu_limit_pct.is_some_and(|pct| pct <= 35) {
+        ctx.request_repaint_after(Duration::from_millis(45));
+    } else if settings.cpu_limit_pct.is_some_and(|pct| pct <= 65) {
+        ctx.request_repaint_after(Duration::from_millis(24));
     } else if raw_dt < 0.002 {
         ctx.request_repaint_after(Duration::from_millis(8));
     } else {
@@ -695,7 +854,7 @@ pub fn draw_sidebar_telemetry(ui: &mut egui::Ui) {
 
     let avail_h = ui.available_height();
     if avail_h < 108.0 {
-        return;
+        return actions;
     }
 
     let compact = avail_h < 166.0;
@@ -708,26 +867,27 @@ pub fn draw_sidebar_telemetry(ui: &mut egui::Ui) {
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
 
     if resp.clicked() {
-        let mut guard = handle.0.lock().unwrap();
-        guard.show_gb_mode = !guard.show_gb_mode;
+        perf_open = !perf_open;
     }
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         let hovered = resp.hovered();
 
-        let frame_stroke_col = if hovered {
+        let frame_stroke_col = if hovered || perf_open {
             mix_c32(p.border, accent, 0.55, 220)
         } else {
             p.border
         };
 
-        // Subtle outer card fill & border matched to active theme palette.
-        painter.rect_filled(rect, CornerRadius::same(12), p.card_bg);
+        // Subtle outer card fill, liquid sheen & border matched to active theme palette.
+        let dock_r = p.corner_radius.min(14);
+        painter.rect_filled(rect, CornerRadius::same(dock_r), p.card_bg);
+        paint_glass_sheen(painter, rect, dock_r, p);
         painter.rect_stroke(
             rect,
-            CornerRadius::same(12),
-            Stroke::new(if hovered { 1.3 } else { 1.0 }, frame_stroke_col),
+            CornerRadius::same(dock_r),
+            Stroke::new(if hovered || perf_open { 1.3 } else { 1.0 }, frame_stroke_col),
             StrokeKind::Inside,
         );
 
@@ -736,8 +896,14 @@ pub fn draw_sidebar_telemetry(ui: &mut egui::Ui) {
         let x1 = rect.right() - pad_x;
         let inner_w = x1 - x0;
 
+        let ram_bar_pct = if let Some(cap_mb) = settings.ram_limit_mb {
+            ((snap.proc_ram_mb / cap_mb.max(1) as f32) * 100.0).clamp(0.0, 100.0)
+        } else {
+            anim_ram
+        };
+
         let fps_col = fps_status_color(anim_fps, accent, p.card_bg);
-        let ram_col = load_status_color(anim_ram, mix_c32(BLUE, accent, 0.30, 255), p.card_bg);
+        let ram_col = load_status_color(ram_bar_pct, mix_c32(BLUE, accent, 0.30, 255), p.card_bg);
         let cpu_col = load_status_color(anim_cpu, accent, p.card_bg);
 
         let div_col = Color32::from_rgba_unmultiplied(p.border.r(), p.border.g(), p.border.b(), 100);
@@ -802,11 +968,13 @@ pub fn draw_sidebar_telemetry(ui: &mut egui::Ui) {
         );
 
         // ---------------------------------------------------------------------
-        // Slot 2: RAM + Animated Liquid Shimmer Gauge
+        // Slot 2: RAM + Animated Liquid Shimmer Gauge (shows allocation cap if set)
         // ---------------------------------------------------------------------
         let s2_top = d1_y + if compact { 4.0 } else { 6.0 };
         paint_ram_icon(painter, Pos2::new(x0, s2_top + 6.0), ram_col);
-        let ram_val_str = if show_gb && snap.ram_total_gb > 0.0 {
+        let ram_val_str = if settings.ram_limit_mb.is_some() {
+            format!("{}M", snap.proc_ram_mb.round().clamp(0.0, 9999.0) as u32)
+        } else if show_gb && snap.ram_total_gb > 0.0 {
             format_gb_short(snap.ram_used_gb)
         } else {
             format!("{}%", anim_ram.round().clamp(0.0, 100.0) as u32)
@@ -828,20 +996,29 @@ pub fn draw_sidebar_telemetry(ui: &mut egui::Ui) {
         paint_ram_meter(
             painter,
             Rect::from_min_size(Pos2::new(x0, bar_y), egui::vec2(inner_w, bar_h)),
-            anim_ram,
+            ram_bar_pct,
             ram_col,
             p.surface_bg,
             p.border,
             t,
         );
-        if !compact && snap.ram_total_gb > 0.0 {
-            painter.text(
-                Pos2::new(x0, bar_y + bar_h + 7.5),
-                egui::Align2::LEFT_CENTER,
-                format!("{}/{}", format_gb_short(snap.ram_used_gb), format_gb_short(snap.ram_total_gb)),
-                FontId::new(8.2, egui::FontFamily::Proportional),
-                p.muted,
-            );
+        if !compact {
+            let ram_sub = if let Some(cap_mb) = settings.ram_limit_mb {
+                format!("Cap {cap_mb}M")
+            } else if snap.ram_total_gb > 0.0 {
+                format!("{}/{}", format_gb_short(snap.ram_used_gb), format_gb_short(snap.ram_total_gb))
+            } else {
+                String::new()
+            };
+            if !ram_sub.is_empty() {
+                painter.text(
+                    Pos2::new(x0, bar_y + bar_h + 7.5),
+                    egui::Align2::LEFT_CENTER,
+                    ram_sub,
+                    FontId::new(8.2, egui::FontFamily::Proportional),
+                    p.muted,
+                );
+            }
         }
 
         // Divider 2
@@ -888,89 +1065,323 @@ pub fn draw_sidebar_telemetry(ui: &mut egui::Ui) {
             t,
         );
         if !compact {
+            let cpu_sub = if let Some(cap) = settings.cpu_limit_pct {
+                format!("Cap {cap}%")
+            } else {
+                format!("App {:.1}%", snap.proc_cpu_pct)
+            };
             painter.text(
                 Pos2::new(x0, eq_y + eq_h + 6.5),
                 egui::Align2::LEFT_CENTER,
-                format!("App {:.1}%", snap.proc_cpu_pct),
+                cpu_sub,
                 FontId::new(8.2, egui::FontFamily::Proportional),
                 p.muted,
             );
         }
     }
 
-    resp.on_hover_ui(|ui| {
-        ui.set_min_width(190.0);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 4.0;
-            ui.label(
-                RichText::new("System Performance")
-                    .size(12.5)
-                    .strong()
-                    .color(p.text),
-            );
-            ui.separator();
+    // Left-dock interactive Performance & Resource Limits overlay popup
+    egui::Popup::from_response(&resp)
+        .id(resp.id.with("perf_overlay"))
+        .open_bool(&mut perf_open)
+        .align(egui::RectAlign::RIGHT_END)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .gap(10.0)
+        .show(|ui| {
+            ui.set_min_width(292.0);
+            ui.set_max_width(310.0);
+            ui.spacing_mut().item_spacing.y = 8.0;
+
+            let accent_fg = if is_dark_color([accent.r(), accent.g(), accent.b()]) {
+                Color32::WHITE
+            } else {
+                Color32::from_rgb(16, 19, 26)
+            };
+
             ui.horizontal(|ui| {
-                ui.label(RichText::new("FPS").size(11.5).color(p.muted));
+                ui.label(RichText::new("Performance & Limits").size(14.5).strong().color(p.text));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(format!("{:.0} FPS ({:.1} ms)", snap.fps, snap.frame_ms))
-                            .size(11.5)
-                            .strong()
-                            .color(fps_status_color(snap.fps, accent, p.card_bg)),
-                    );
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("\u{00D7}").size(14.0).color(p.muted))
+                                .frame(false),
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                    }
+                    let unit_lbl = if show_gb { "Unit: GB/ms" } else { "Unit: %" };
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new(unit_lbl).size(11.0).color(p.text))
+                                .fill(p.surface_bg)
+                                .stroke(Stroke::new(1.0, p.border))
+                                .corner_radius(6),
+                        )
+                        .clicked()
+                    {
+                        show_gb = !show_gb;
+                    }
                 });
             });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("RAM").size(11.5).color(p.muted));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+
+            // Live RustBlox & PC summary box
+            egui::Frame::new()
+                .fill(p.surface_bg)
+                .stroke(Stroke::new(1.0, p.border))
+                .corner_radius(8)
+                .inner_margin(egui::Margin::symmetric(10, 7))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.label(
                         RichText::new(format!(
-                            "{:.1} / {:.1} GB ({:.0}%)",
-                            snap.ram_used_gb, snap.ram_total_gb, snap.ram_pct
+                            "RustBlox: {:.0} MB RAM  •  {:.1}% CPU  •  {:.0} FPS",
+                            snap.proc_ram_mb, snap.proc_cpu_pct, snap.fps
                         ))
                         .size(11.5)
                         .strong()
                         .color(p.text),
                     );
-                });
-            });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Processor").size(11.5).color(p.muted));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(format!("{:.1}% ({} threads)", snap.cpu_pct, snap.cpu_cores))
-                            .size(11.5)
-                            .strong()
-                            .color(p.text),
-                    );
-                });
-            });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("RustBlox").size(11.0).color(p.muted));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         RichText::new(format!(
-                            "{:.0} MB RAM  •  {:.1}% CPU",
-                            snap.proc_ram_mb, snap.proc_cpu_pct
+                            "System: {:.1}/{:.1} GB ({:.0}%)  •  {:.0}% CPU ({} threads)",
+                            snap.ram_used_gb,
+                            snap.ram_total_gb,
+                            snap.ram_pct,
+                            snap.cpu_pct,
+                            snap.cpu_cores
                         ))
                         .size(11.0)
                         .color(p.muted),
                     );
                 });
+
+            // RAM Allocation Cap controls
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("RAM Allocation (RustBlox)").size(12.5).strong().color(p.text));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let lbl = settings
+                        .ram_limit_mb
+                        .map(|mb| format!("{mb} MB"))
+                        .unwrap_or_else(|| "Auto".to_string());
+                    ui.label(RichText::new(lbl).size(12.0).strong().color(accent));
+                });
             });
-            ui.add_space(2.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
+                for (opt, label) in [
+                    (None, "Auto"),
+                    (Some(192), "192M"),
+                    (Some(256), "256M"),
+                    (Some(512), "512M"),
+                    (Some(1024), "1G"),
+                ] {
+                    let sel = settings.ram_limit_mb == opt;
+                    let btn = egui::Button::new(
+                        RichText::new(label)
+                            .size(11.5)
+                            .strong()
+                            .color(if sel { accent_fg } else { p.text }),
+                    )
+                    .fill(if sel { accent } else { p.surface_bg })
+                    .corner_radius(6);
+                    if ui.add(btn).clicked() && !sel {
+                        settings.ram_limit_mb = opt;
+                        actions.settings_changed = true;
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                let mut mb_val = settings.ram_limit_mb.unwrap_or(512) as f32;
+                let slider_resp = ui.add(
+                    egui::Slider::new(&mut mb_val, 128.0..=2048.0)
+                        .step_by(32.0)
+                        .suffix(" MB"),
+                );
+                if slider_resp.changed() {
+                    settings.ram_limit_mb = Some((mb_val.round() as u32).clamp(128, 2048));
+                    actions.settings_changed = true;
+                }
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new("Trim RAM").size(11.5).color(p.text))
+                            .fill(p.surface_bg)
+                            .stroke(Stroke::new(1.0, p.border))
+                            .corner_radius(6),
+                    )
+                    .on_hover_text("Free cached video buffers and trim unused RAM now")
+                    .clicked()
+                {
+                    actions.trim_ram_requested = true;
+                }
+            });
+
+            // CPU Limiter controls
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("CPU Limiter (RustBlox)").size(12.5).strong().color(p.text));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let lbl = settings
+                        .cpu_limit_pct
+                        .map(|pct| format!("{pct}%"))
+                        .unwrap_or_else(|| "Unlimited".to_string());
+                    ui.label(RichText::new(lbl).size(12.0).strong().color(accent));
+                });
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
+                for (opt, label) in [
+                    (None, "Unlimited"),
+                    (Some(25), "25%"),
+                    (Some(50), "50%"),
+                    (Some(75), "75%"),
+                ] {
+                    let sel = settings.cpu_limit_pct == opt;
+                    let btn = egui::Button::new(
+                        RichText::new(label)
+                            .size(11.5)
+                            .strong()
+                            .color(if sel { accent_fg } else { p.text }),
+                    )
+                    .fill(if sel { accent } else { p.surface_bg })
+                    .corner_radius(6);
+                    if ui.add(btn).clicked() && !sel {
+                        settings.cpu_limit_pct = opt;
+                        actions.settings_changed = true;
+                    }
+                }
+            });
+            let mut cpu_val = settings.cpu_limit_pct.unwrap_or(100) as f32;
+            if ui
+                .add(
+                    egui::Slider::new(&mut cpu_val, 15.0..=100.0)
+                        .step_by(5.0)
+                        .suffix("%"),
+                )
+                .changed()
+            {
+                let v = cpu_val.round() as u8;
+                settings.cpu_limit_pct = if v >= 100 { None } else { Some(v.clamp(10, 95)) };
+                actions.settings_changed = true;
+            }
             ui.label(
-                RichText::new("Click dock to toggle % / GB / ms")
-                    .size(10.0)
+                RichText::new("Caps RustBlox app CPU only (Roblox games run uncapped).")
+                    .size(10.5)
                     .color(p.muted),
             );
         });
-    });
+
+    {
+        let mut guard = handle.0.lock().unwrap();
+        guard.show_gb_mode = show_gb;
+        guard.perf_open = perf_open;
+    }
+
+    if !perf_open {
+        resp.on_hover_ui(|ui| {
+            ui.set_min_width(205.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.label(
+                    RichText::new("System Performance")
+                        .size(12.5)
+                        .strong()
+                        .color(p.text),
+                );
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("FPS").size(11.5).color(p.muted));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("{:.0} FPS ({:.1} ms)", snap.fps, snap.frame_ms))
+                                .size(11.5)
+                                .strong()
+                                .color(fps_status_color(snap.fps, accent, p.card_bg)),
+                        );
+                    });
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("RAM").size(11.5).color(p.muted));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "{:.1} / {:.1} GB ({:.0}%)",
+                                snap.ram_used_gb, snap.ram_total_gb, snap.ram_pct
+                            ))
+                            .size(11.5)
+                            .strong()
+                            .color(p.text),
+                        );
+                    });
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Processor").size(11.5).color(p.muted));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("{:.1}% ({} threads)", snap.cpu_pct, snap.cpu_cores))
+                                .size(11.5)
+                                .strong()
+                                .color(p.text),
+                        );
+                    });
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("RustBlox").size(11.0).color(p.muted));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "{:.0} MB RAM  •  {:.1}% CPU",
+                                snap.proc_ram_mb, snap.proc_cpu_pct
+                            ))
+                            .size(11.0)
+                            .color(p.muted),
+                        );
+                    });
+                });
+                if settings.ram_limit_mb.is_some() || settings.cpu_limit_pct.is_some() {
+                    let ram_txt = settings
+                        .ram_limit_mb
+                        .map(|m| format!("RAM {m}M"))
+                        .unwrap_or_else(|| "RAM Auto".to_string());
+                    let cpu_txt = settings
+                        .cpu_limit_pct
+                        .map(|c| format!("CPU {c}%"))
+                        .unwrap_or_else(|| "CPU Unlim".to_string());
+                    ui.label(
+                        RichText::new(format!("Limits: {ram_txt}  •  {cpu_txt}"))
+                            .size(10.5)
+                            .color(accent),
+                    );
+                }
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new("Click dock to set RAM & CPU limits")
+                        .size(10.0)
+                        .color(p.muted),
+                );
+            });
+        });
+    }
+
+    actions
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_limit_helpers_compute_valid_budgets_and_cpu_rates() {
+        assert_eq!(compute_cpu_rate_param(None), None);
+        assert_eq!(compute_cpu_rate_param(Some(100)), None);
+        assert_eq!(compute_cpu_rate_param(Some(50)), Some(5000));
+        assert_eq!(compute_cpu_rate_param(Some(5)), Some(1000));
+
+        assert_eq!(max_video_cache_for_ram_limit(None), 8);
+        assert_eq!(max_video_cache_for_ram_limit(Some(160)), 1);
+        assert_eq!(max_video_cache_for_ram_limit(Some(256)), 2);
+        assert_eq!(max_video_cache_for_ram_limit(Some(512)), 4);
+        assert_eq!(max_video_cache_for_ram_limit(Some(1024)), 6);
+    }
 
     #[test]
     fn cpu_percentage_accounts_for_idle_inside_kernel_time() {

@@ -801,6 +801,27 @@ pub fn resolve_game_link(input: &str, cookie: Option<&str>) -> Result<ResolvedGa
     })
 }
 
+pub fn resolve_game_and_icon_by_place(place_id: u64) -> Option<(Game, Option<String>)> {
+    if place_id == 0 {
+        return None;
+    }
+    let game = games_by_places(&[place_id]).into_iter().next()?;
+    let icon_url = get_json(&format!(
+        "https://thumbnails.roblox.com/v1/games/icons?universeIds={}&returnPolicy=PlaceHolder&size=256x256&format=Png&isCircular=false",
+        game.universe_id
+    ))
+    .ok()
+    .and_then(|v| {
+        v["data"]
+            .as_array()?
+            .first()
+            .and_then(|item| item["imageUrl"].as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    });
+    Some((game, icon_url))
+}
+
 pub fn fetch_user_favorite_games(uid: u64, cookie: &str) -> Result<Vec<u64>, String> {
     let v = auth_get_json(
         &format!("https://games.roblox.com/v2/users/{uid}/favorite/games?sortOrder=Desc&limit=25"),

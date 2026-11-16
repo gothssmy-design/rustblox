@@ -1,15 +1,10 @@
 ﻿use std::collections::HashMap;
 use eframe::egui::{self, Color32, CornerRadius, Sense, Vec2, RichText};
-use crate::theme::{accent_color, compact, lerp_color, pal, BLUE, GREEN, ORANGE};
+use crate::theme::{accent_color, card_frame, compact, lerp_color, pal, BLUE, GREEN, ORANGE};
 use crate::types::{Action, CardPreview, Game};
 
 pub fn avatar_glass_frame(ui: &egui::Ui, pad: i8) -> egui::Frame {
-    let p = pal(ui);
-    egui::Frame::new()
-        .fill(p.card_bg)
-        .stroke(egui::Stroke::new(1.0, p.border))
-        .corner_radius(14)
-        .inner_margin(pad)
+    card_frame(ui, pad)
 }
 
 pub fn thumb_styled_with_video(

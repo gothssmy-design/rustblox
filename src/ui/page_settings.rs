@@ -13,7 +13,8 @@ use crate::theme::{
     accent_color, apply_theme, card_frame, effective_dark_mode, is_dark_color, pal, Palette,
     BLUE, GREEN, ORANGE, RED,
 };
-use crate::types::{Action, BgMode, TextColorMode};
+use crate::tray::set_windows_startup;
+use crate::types::{Action, BgMode, Settings, TextColorMode};
 use crate::ui::page_login::draw_login_marquee;
 use crate::ui::widgets::*;
 use crate::updater::{UpdateKind, RUSTBLOX_RELEASES_URL};
@@ -256,6 +257,135 @@ impl RustBlox {
                         .to_string(),
                 );
 
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                // RustBlox app RAM allocation & CPU limiter controls (also adjustable from left performance dock)
+                let p = pal(ui);
+                let accent = accent_color(ui);
+                let accent_fg = if is_dark_color([accent.r(), accent.g(), accent.b()]) {
+                    Color32::WHITE
+                } else {
+                    Color32::from_rgb(16, 19, 26)
+                };
+                let mut limits_changed = false;
+                let mut trim_now = false;
+
+                ui.horizontal(|ui| {
+                    ui.label("RustBlox RAM limit:");
+                    let cur_txt = self
+                        .settings
+                        .ram_limit_mb
+                        .map(|mb| format!("{mb} MB"))
+                        .unwrap_or_else(|| "Auto".to_string());
+                    ui.label(RichText::new(cur_txt).strong().color(accent));
+                    if let Some(used_mb) = crate::telemetry::current_process_ram_mb() {
+                        ui.label(
+                            RichText::new(format!("(currently {used_mb:.0} MB)"))
+                                .size(12.0)
+                                .color(p.muted),
+                        );
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                    for (opt, lbl) in [
+                        (None, "Auto"),
+                        (Some(192), "192 MB"),
+                        (Some(256), "256 MB"),
+                        (Some(512), "512 MB"),
+                        (Some(1024), "1024 MB"),
+                    ] {
+                        let sel = self.settings.ram_limit_mb == opt;
+                        let btn = egui::Button::new(
+                            RichText::new(lbl)
+                                .size(12.0)
+                                .strong()
+                                .color(if sel { accent_fg } else { p.text }),
+                        )
+                        .fill(if sel { accent } else { p.surface_bg })
+                        .corner_radius(7);
+                        if ui.add(btn).clicked() && !sel {
+                            self.settings.ram_limit_mb = opt;
+                            limits_changed = true;
+                        }
+                    }
+                    let mut mb_val = self.settings.ram_limit_mb.unwrap_or(512) as f32;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut mb_val, 128.0..=2048.0)
+                                .step_by(32.0)
+                                .suffix(" MB"),
+                        )
+                        .changed()
+                    {
+                        self.settings.ram_limit_mb = Some((mb_val.round() as u32).clamp(128, 2048));
+                        limits_changed = true;
+                    }
+                    if ui.button("Trim RAM Now").clicked() {
+                        trim_now = true;
+                    }
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("RustBlox CPU limit:");
+                    let cur_txt = self
+                        .settings
+                        .cpu_limit_pct
+                        .map(|pct| format!("{pct}%"))
+                        .unwrap_or_else(|| "Unlimited".to_string());
+                    ui.label(RichText::new(cur_txt).strong().color(accent));
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                    for (opt, lbl) in [
+                        (None, "Unlimited"),
+                        (Some(25), "25%"),
+                        (Some(50), "50%"),
+                        (Some(75), "75%"),
+                    ] {
+                        let sel = self.settings.cpu_limit_pct == opt;
+                        let btn = egui::Button::new(
+                            RichText::new(lbl)
+                                .size(12.0)
+                                .strong()
+                                .color(if sel { accent_fg } else { p.text }),
+                        )
+                        .fill(if sel { accent } else { p.surface_bg })
+                        .corner_radius(7);
+                        if ui.add(btn).clicked() && !sel {
+                            self.settings.cpu_limit_pct = opt;
+                            limits_changed = true;
+                        }
+                    }
+                    let mut cpu_val = self.settings.cpu_limit_pct.unwrap_or(100) as f32;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut cpu_val, 15.0..=100.0)
+                                .step_by(5.0)
+                                .suffix("%"),
+                        )
+                        .changed()
+                    {
+                        let v = cpu_val.round() as u8;
+                        self.settings.cpu_limit_pct = if v >= 100 { None } else { Some(v.clamp(10, 95)) };
+                        limits_changed = true;
+                    }
+                });
+                small_text(
+                    ui,
+                    "Caps only RustBlox itself (also quick-tweakable from the bottom-left performance dock); Roblox games stay uncapped."
+                        .to_string(),
+                );
+                if limits_changed {
+                    save_settings(&self.settings);
+                }
+                if limits_changed || trim_now {
+                    self.apply_runtime_resource_limits(trim_now);
+                }
+
                 ui.add_space(10.0);
                 let prev_auto_close = self.settings.auto_close_roblox;
                 ui.checkbox(
@@ -317,6 +447,16 @@ impl RustBlox {
 
             ui.add_space(12.0);
 
+            // Discord Rich Presence card
+            self.settings_discord_card(ui);
+
+            ui.add_space(12.0);
+
+            // System Tray & Startup card
+            self.settings_tray_startup_card(ui);
+
+            ui.add_space(12.0);
+
             // Built-in FastFlags card
             self.settings_fastflags_card(ui);
 
@@ -326,6 +466,245 @@ impl RustBlox {
             self.settings_advanced_card(ui);
         });
         ui.add_space(20.0);
+    }
+
+    fn settings_discord_card(&mut self, ui: &mut egui::Ui) {
+        let p = pal(ui);
+        let rpc_status = self.discord_rpc.status();
+        let mut changed = false;
+
+        card_frame(ui, 18).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Discord Rich Presence").size(17.0).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (badge_txt, badge_col) = if !self.settings.discord_rpc_enabled {
+                        ("Disabled", p.muted)
+                    } else if rpc_status.connected {
+                        ("Connected", GREEN)
+                    } else {
+                        ("Waiting for Discord", ORANGE)
+                    };
+                    egui::Frame::new()
+                        .fill(p.surface_bg)
+                        .stroke(egui::Stroke::new(1.0, badge_col.gamma_multiply(0.55)))
+                        .corner_radius(6)
+                        .inner_margin(egui::Margin::symmetric(8, 3))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(badge_txt).size(11.5).strong().color(badge_col));
+                        });
+                });
+            });
+            ui.add_space(8.0);
+
+            if ui
+                .checkbox(
+                    &mut self.settings.discord_rpc_enabled,
+                    "Show active Roblox game and launcher status on Discord",
+                )
+                .changed()
+            {
+                changed = true;
+            }
+
+            if self.settings.discord_rpc_enabled {
+                ui.add_space(6.0);
+                if ui
+                    .checkbox(
+                        &mut self.settings.discord_rpc_show_idle,
+                        "Show \"Browsing RustBlox\" while in the launcher",
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("Application ID (optional):");
+                    let edit = egui::TextEdit::singleline(&mut self.settings.discord_rpc_app_id)
+                        .hint_text(format!(
+                            "Default ({})",
+                            crate::discord_rpc::DEFAULT_DISCORD_APP_ID
+                        ))
+                        .desired_width(210.0);
+                    if ui.add(edit).lost_focus() {
+                        let trimmed = self.settings.discord_rpc_app_id.trim().to_string();
+                        if self.settings.discord_rpc_app_id != trimmed {
+                            self.settings.discord_rpc_app_id = trimmed;
+                        }
+                        changed = true;
+                    }
+                    if !self.settings.discord_rpc_app_id.trim().is_empty()
+                        && ui.button("Use Default").clicked()
+                    {
+                        self.settings.discord_rpc_app_id.clear();
+                        changed = true;
+                    }
+                });
+                ui.add_space(4.0);
+                small_text(
+                    ui,
+                    "Shows the active game name, creator, icon, elapsed timer, and \"Open on Roblox\" button. Leave Application ID blank for default Roblox RPC, or use your own ID from discord.com/developers/applications."
+                        .to_string(),
+                );
+                if !rpc_status.status_text.is_empty() {
+                    ui.add_space(4.0);
+                    small_text(ui, format!("Status: {}", rpc_status.status_text));
+                }
+            } else {
+                ui.add_space(4.0);
+                small_text(
+                    ui,
+                    "Discord Rich Presence is off. Enable it to broadcast what Roblox game you're playing."
+                        .to_string(),
+                );
+            }
+        });
+
+        if changed {
+            save_settings(&self.settings);
+            self.sync_discord_presence();
+            self.sync_tray_state();
+        }
+    }
+
+    fn settings_tray_startup_card(&mut self, ui: &mut egui::Ui) {
+        let p = pal(ui);
+        let mut save_needed = false;
+
+        card_frame(ui, 18).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("System Tray & Startup").size(17.0).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (badge_txt, badge_col) =
+                        match (self.settings.tray_enabled, self.settings.start_with_windows) {
+                            (true, true) => ("Tray & Startup On", GREEN),
+                            (true, false) => ("Tray Active", GREEN),
+                            (false, true) => ("Startup On", ORANGE),
+                            (false, false) => ("Standard Window", p.muted),
+                        };
+                    egui::Frame::new()
+                        .fill(p.surface_bg)
+                        .stroke(egui::Stroke::new(1.0, badge_col.gamma_multiply(0.55)))
+                        .corner_radius(6)
+                        .inner_margin(egui::Margin::symmetric(8, 3))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(badge_txt).size(11.5).strong().color(badge_col));
+                        });
+                });
+            });
+            ui.add_space(8.0);
+
+            let prev_tray = self.settings.tray_enabled;
+            if ui
+                .checkbox(
+                    &mut self.settings.tray_enabled,
+                    "Keep RustBlox icon in the Windows system tray",
+                )
+                .changed()
+            {
+                save_needed = true;
+                self.status = if self.settings.tray_enabled {
+                    "System Tray Mode enabled.".to_string()
+                } else {
+                    "System Tray Mode disabled.".to_string()
+                };
+            }
+
+            ui.indent("tray_sub_options", |ui| {
+                ui.add_enabled_ui(self.settings.tray_enabled, |ui| {
+                    if ui
+                        .checkbox(
+                            &mut self.settings.tray_minimize_on_close,
+                            "Minimize to system tray when clicking Close (X)",
+                        )
+                        .changed()
+                    {
+                        save_needed = true;
+                    }
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Minimize to Tray now").clicked() {
+                            let show_tip = !self.tray_minimize_balloon_shown;
+                            self.tray_minimize_balloon_shown = true;
+                            self.hide_to_tray(&ui.ctx().clone(), show_tip);
+                        }
+                        if ui.button(RichText::new("Quit RustBlox").color(RED)).clicked() {
+                            self.quit_app();
+                        }
+                    });
+                });
+            });
+            if prev_tray != self.settings.tray_enabled {
+                self.sync_tray_state();
+            }
+
+            ui.add_space(10.0);
+
+            let mut startup_enabled = self.settings.start_with_windows;
+            if ui
+                .checkbox(
+                    &mut startup_enabled,
+                    "Start RustBlox automatically with Windows",
+                )
+                .changed()
+            {
+                match set_windows_startup(startup_enabled, self.settings.start_minimized_to_tray) {
+                    Ok(()) => {
+                        self.settings.start_with_windows = startup_enabled;
+                        self.startup_err = None;
+                        save_needed = true;
+                        self.status = if startup_enabled {
+                            "Enabled Start with Windows.".to_string()
+                        } else {
+                            "Disabled Start with Windows.".to_string()
+                        };
+                    }
+                    Err(e) => {
+                        self.startup_err = Some(e);
+                    }
+                }
+            }
+
+            ui.indent("startup_sub_options", |ui| {
+                ui.add_enabled_ui(self.settings.start_with_windows, |ui| {
+                    if ui
+                        .checkbox(
+                            &mut self.settings.start_minimized_to_tray,
+                            "Start minimized to system tray on boot (--tray)",
+                        )
+                        .changed()
+                    {
+                        match set_windows_startup(true, self.settings.start_minimized_to_tray) {
+                            Ok(()) => {
+                                self.startup_err = None;
+                                save_needed = true;
+                            }
+                            Err(e) => {
+                                self.startup_err = Some(e);
+                            }
+                        }
+                    }
+                });
+            });
+
+            ui.add_space(4.0);
+            small_text(
+                ui,
+                "Right-click the tray icon to open RustBlox, toggle Discord RPC, check updates, or quit.".to_string(),
+            );
+            if let Some(err) = &self.startup_err {
+                ui.add_space(4.0);
+                ui.label(RichText::new(err).size(12.0).color(RED));
+            }
+        });
+
+        if save_needed {
+            save_settings(&self.settings);
+            self.sync_tray_state();
+        }
     }
 
     fn settings_fastflags_card(&mut self, ui: &mut egui::Ui) {
@@ -568,8 +947,11 @@ impl RustBlox {
 
         card_frame(ui, 18).show(ui, |ui| {
             ui.set_width(ui.available_width());
+            let def_s = Settings::default();
             let has_custom = self.settings.bg_mode != BgMode::ThemeDefault
                 || self.settings.text_mode != TextColorMode::Auto
+                || self.settings.glass_edition
+                || self.settings.corner_roundness != def_s.corner_roundness
                 || self.settings.borders_color.is_some()
                 || self.settings.profile_color.is_some()
                 || self.settings.friends_color.is_some()
@@ -582,6 +964,10 @@ impl RustBlox {
                     if has_custom && ui.button("Reset to Default").clicked() {
                         self.settings.bg_mode = BgMode::ThemeDefault;
                         self.settings.text_mode = TextColorMode::Auto;
+                        self.settings.glass_edition = false;
+                        self.settings.glass_opacity = def_s.glass_opacity;
+                        self.settings.glass_highlight = def_s.glass_highlight;
+                        self.settings.corner_roundness = def_s.corner_roundness;
                         self.settings.borders_color = None;
                         self.settings.profile_color = None;
                         self.settings.friends_color = None;
@@ -651,6 +1037,44 @@ impl RustBlox {
                         self.settings.text_border_color = pack.text_border;
                         changed = true;
                     }
+                }
+
+                // Toggleable Liquid Glass UI chip (works on top of any style/background)
+                let glass_active = self.settings.glass_edition;
+                let glass_label = if glass_active {
+                    "Liquid Glass: ON"
+                } else {
+                    "Liquid Glass: OFF"
+                };
+                let glass_resp = egui::Frame::new()
+                    .fill(if glass_active { p.selected_bg } else { p.surface_bg })
+                    .stroke(egui::Stroke::new(
+                        if glass_active { 1.5 } else { 1.0 },
+                        if glass_active { accent } else { p.border },
+                    ))
+                    .corner_radius(8)
+                    .inner_margin(egui::Margin::symmetric(10, 5))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (dr, _) = ui.allocate_exact_size(
+                                egui::vec2(10.0, 10.0),
+                                Sense::hover(),
+                            );
+                            let ring_col = if glass_active { accent } else { p.muted };
+                            ui.painter().circle_stroke(
+                                dr.center(),
+                                4.2,
+                                egui::Stroke::new(1.5, ring_col),
+                            );
+                            ui.label(RichText::new(glass_label).size(12.5).strong());
+                        });
+                    })
+                    .response
+                    .interact(Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                if glass_resp.clicked() {
+                    self.settings.glass_edition = !self.settings.glass_edition;
+                    changed = true;
                 }
             });
 
@@ -753,6 +1177,73 @@ impl RustBlox {
                 if let Some(err) = &self.wallpaper_err {
                     ui.colored_label(RED, err);
                 }
+            }
+
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .checkbox(
+                        &mut self.settings.glass_edition,
+                        RichText::new("Glass Liquid Edition (translucent frosted UI cards & liquid sheen)")
+                            .strong(),
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+            });
+            if self.settings.glass_edition {
+                ui.add_space(6.0);
+                egui::Frame::new()
+                    .fill(p.surface_bg)
+                    .stroke(egui::Stroke::new(1.0, p.border))
+                    .corner_radius(10)
+                    .inner_margin(egui::Margin::symmetric(12, 10))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(12.0, 6.0);
+                            ui.horizontal(|ui| {
+                                ui.label("Glass frost:");
+                                let mut pct = (self.settings.glass_opacity * 100.0).round();
+                                if ui
+                                    .add(egui::Slider::new(&mut pct, 20.0..=92.0).suffix("%"))
+                                    .changed()
+                                {
+                                    self.settings.glass_opacity = (pct / 100.0).clamp(0.20, 0.92);
+                                    changed = true;
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Liquid sheen:");
+                                let mut sheen_pct = (self.settings.glass_highlight * 100.0).round();
+                                if ui
+                                    .add(egui::Slider::new(&mut sheen_pct, 0.0..=100.0).suffix("%"))
+                                    .changed()
+                                {
+                                    self.settings.glass_highlight =
+                                        (sheen_pct / 100.0).clamp(0.0, 1.0);
+                                    changed = true;
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Card roundness:");
+                                let mut r_val = self.settings.corner_roundness as f32;
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut r_val, 6.0..=22.0)
+                                            .step_by(1.0)
+                                            .suffix(" px"),
+                                    )
+                                    .changed()
+                                {
+                                    self.settings.corner_roundness =
+                                        (r_val.round() as u8).clamp(6, 22);
+                                    changed = true;
+                                }
+                            });
+                        });
+                    });
             }
 
             ui.add_space(12.0);
@@ -970,7 +1461,12 @@ impl RustBlox {
         let paint_base = |ui: &mut egui::Ui, rect: egui::Rect| {
             let painter = ui.painter();
             painter.rect_filled(rect, CornerRadius::same(10), p.bg);
-            if self.settings.bg_mode == BgMode::Wallpaper {
+            if self.settings.bg_mode == BgMode::SolidColor {
+                let [r, g, b] = self.settings.bg_color;
+                painter.rect_filled(rect, CornerRadius::same(10), Color32::from_rgb(r, g, b));
+            } else if self.settings.bg_mode == BgMode::Wallpaper {
+                let base = Palette::of(dark).bg;
+                painter.rect_filled(rect, CornerRadius::same(10), base);
                 if let Some((_, tex)) = &self.wallpaper_tex {
                     let mut clipped = ui.new_child(egui::UiBuilder::new().max_rect(rect));
                     clipped.set_clip_rect(rect.intersect(ui.clip_rect()));

@@ -9,7 +9,12 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, RichText, Sense};
 
 use crate::avatar_3d::{self, Avatar3DState, load_avatar_3d_data};
+use crate::discord_rpc::{DiscordActivity, DiscordRpcClient, DiscordRpcConfig};
 use crate::fastflags::{load_fastflags, save_fastflags, sync_client_fastflags, FastFlagsConfig};
+use crate::tray::{
+    is_windows_startup_enabled, sync_windows_startup_path_if_enabled, TrayController, TrayEvent,
+    TrayState,
+};
 use crate::types::*;
 use crate::theme::*;
 use crate::auth::*;
@@ -176,6 +181,20 @@ pub struct RustBlox {
     pub wallpaper_loading: Option<String>,
     pub wallpaper_err: Option<String>,
     pub settings_advanced_open: bool,
+    pub last_ram_trim_check: Option<Instant>,
+    pub discord_rpc: DiscordRpcClient,
+    pub app_started_epoch_secs: u64,
+    pub active_roblox_place_id: Option<u64>,
+    pub active_roblox_started_at: Option<u64>,
+    pub pending_discord_launch: Option<(u64, Option<Game>, Instant)>,
+    pub discord_resolved_games: HashMap<u64, (Game, Option<String>)>,
+    pub discord_resolving_places: HashSet<u64>,
+    pub tray: TrayController,
+    pub window_visible: bool,
+    pub tray_minimize_balloon_shown: bool,
+    pub allow_close_exit: bool,
+    pub pending_start_in_tray_frames: u8,
+    pub startup_err: Option<String>,
 
     pub saved_accounts: Vec<StoredAccount>,
     pub fastflags: FastFlagsConfig,
@@ -188,12 +207,35 @@ pub struct RustBlox {
 
 
 impl RustBlox {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, start_in_tray: bool) -> Self {
         let (tx, rx) = channel();
         let sid = new_session_id();
         let cookie = load_cookie();
         let logged_in = cookie.is_some();
-        let settings = load_settings();
+        let mut settings = load_settings();
+        let startup_live = is_windows_startup_enabled();
+        if startup_live {
+            sync_windows_startup_path_if_enabled(settings.start_minimized_to_tray);
+        }
+        if settings.start_with_windows != startup_live {
+            settings.start_with_windows = startup_live;
+            save_settings(&settings);
+        }
+        let tray = TrayController::new(
+            TrayState {
+                enabled: settings.tray_enabled,
+                window_visible: !start_in_tray,
+                status_line: if logged_in {
+                    "Starting session...".to_string()
+                } else {
+                    "Not signed in".to_string()
+                },
+                tooltip: "RustBlox".to_string(),
+                discord_rpc_enabled: settings.discord_rpc_enabled,
+            },
+            tx.clone(),
+            cc.egui_ctx.clone(),
+        );
         let saved_accounts = load_accounts();
         let fastflags = load_fastflags();
         let _ = sync_client_fastflags(&fastflags, settings.target_fps, &[]);
@@ -355,6 +397,20 @@ impl RustBlox {
             wallpaper_loading: None,
             wallpaper_err: None,
             settings_advanced_open: false,
+            last_ram_trim_check: None,
+            discord_rpc: DiscordRpcClient::new(),
+            app_started_epoch_secs: now_unix_ms() / 1000,
+            active_roblox_place_id: None,
+            active_roblox_started_at: None,
+            pending_discord_launch: None,
+            discord_resolved_games: HashMap::new(),
+            discord_resolving_places: HashSet::new(),
+            tray,
+            window_visible: !start_in_tray,
+            tray_minimize_balloon_shown: false,
+            allow_close_exit: false,
+            pending_start_in_tray_frames: if start_in_tray { 2 } else { 0 },
+            startup_err: None,
             saved_accounts,
             fastflags,
             ff_new_key: String::new(),
@@ -363,6 +419,9 @@ impl RustBlox {
             ff_json_open: false,
             ff_err: None,
         };
+        app.apply_runtime_resource_limits(false);
+        app.sync_discord_presence();
+        app.sync_tray_state();
         if app.settings.bg_mode == BgMode::Wallpaper && !app.settings.bg_wallpaper.trim().is_empty() {
             let path = app.settings.bg_wallpaper.clone();
             app.request_wallpaper_load(path);
@@ -519,6 +578,8 @@ impl RustBlox {
             match launch_updater_process(&release) {
                 Ok(()) => {
                     self.app_staged_patch = None;
+                    self.allow_close_exit = true;
+                    self.tray.shutdown();
                     self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 Err(e) => {
@@ -885,6 +946,7 @@ impl RustBlox {
         self.manual_game_focus_requested = false;
         self.manual_game_err = None;
         self.active_private_server = None;
+        self.pending_discord_launch = None;
         self.sorts = None;
         self.recent.clear();
         self.favs.clear();
@@ -991,6 +1053,7 @@ impl RustBlox {
         self.sync_sorts(true);
         self.sync_saved(true);
         self.sync_auth_session(true);
+        self.sync_discord_presence();
     }
 
     pub fn remove_saved_account(&mut self, user_id: u64) {
@@ -1024,6 +1087,7 @@ impl RustBlox {
                 self.page = Page::Login;
                 self.back = Page::Login;
                 self.status = "Account removed — sign in with Quick Login to continue.".to_string();
+                self.sync_discord_presence();
             }
         } else if let Some(acc) = removed {
             self.status = format!("Removed saved account @{}", acc.name);
@@ -1061,6 +1125,7 @@ impl RustBlox {
         self.page = Page::Login;
         self.back = Page::Login;
         self.status = "Signed out — sign in with Quick Login to continue.".to_string();
+        self.sync_discord_presence();
     }
 
     pub fn request_thumbs(&mut self, ids: Vec<u64>) {
@@ -1214,10 +1279,15 @@ impl RustBlox {
                     if !logged_in {
                         continue;
                     }
+                    let mut updated_current = false;
                     if let Page::Game(cur) = &mut self.page {
                         if cur.universe_id == full.universe_id {
                             *cur = full;
+                            updated_current = true;
                         }
+                    }
+                    if updated_current {
+                        self.sync_discord_presence();
                     }
                 }
                 Msg::Details(None) => {}
@@ -1252,7 +1322,10 @@ impl RustBlox {
                     self.video_decode_requested.remove(&vid);
                     if let Ok(video) = res {
                         if !self.decoded_videos.contains_key(&vid) {
-                            if self.video_lru.len() >= 8 {
+                            let max_videos = crate::telemetry::max_video_cache_for_ram_limit(
+                                self.settings.ram_limit_mb,
+                            );
+                            while self.video_lru.len() >= max_videos {
                                 if let Some(old_vid) = self.video_lru.pop() {
                                     self.decoded_videos.remove(&old_vid);
                                 }
@@ -1496,6 +1569,7 @@ impl RustBlox {
                         }
                         self.icon.insert(uid, url);
                     }
+                    self.sync_discord_presence();
                 }
                 Msg::MyProfile(r) => {
                     self.my_profile_loading = false;
@@ -1982,6 +2056,7 @@ impl RustBlox {
                             self.me_err = None;
                             self.friends = friends;
                             self.friends_err = None;
+                            self.sync_tray_state();
                             if self.known_friend_requests.is_none()
                                 && !self.social_loading.contains(&SocialTab::Requests)
                             {
@@ -2050,6 +2125,7 @@ impl RustBlox {
                         self.sync_sorts(true);
                         self.sync_saved(true);
                         self.sync_auth_session(true);
+                        self.sync_discord_presence();
                     }
                     Err(e) => {
                         if let Some(ql) = &mut self.quick_login {
@@ -2067,12 +2143,23 @@ impl RustBlox {
                     }
                 }
                 Msg::LaunchResult(r) => {
+                    if r.is_err() {
+                        self.pending_discord_launch = None;
+                        if self.active_roblox_place_id.is_none() {
+                            self.active_roblox_started_at = None;
+                        }
+                        self.sync_discord_presence();
+                    }
                     self.status = match r {
                         Ok(s) => s,
                         Err(e) => format!("Launch error: {e}"),
                     };
                 }
                 Msg::RobloxAppClosed => {
+                    self.active_roblox_place_id = None;
+                    self.active_roblox_started_at = None;
+                    self.pending_discord_launch = None;
+                    self.sync_discord_presence();
                     if self.status.contains("Launching")
                         || self.status.contains("Joining")
                         || self.status.contains("Getting launch ticket")
@@ -2083,6 +2170,70 @@ impl RustBlox {
                         self.sync_saved(true);
                         self.sync_auth_session(true);
                     }
+                }
+                Msg::RobloxSessionUpdated(place_opt) => {
+                    if self.active_roblox_place_id != place_opt {
+                        match place_opt {
+                            Some(pid) => {
+                                let matching_pending = self
+                                    .pending_discord_launch
+                                    .as_ref()
+                                    .is_some_and(|(p, _, _)| *p == pid);
+                                if let Some((p, Some(g), _)) = self.pending_discord_launch.take() {
+                                    if p == pid {
+                                        let icon = self.icon.get(&g.universe_id).cloned();
+                                        self.discord_resolved_games
+                                            .entry(pid)
+                                            .or_insert((g, icon));
+                                    }
+                                }
+                                self.active_roblox_place_id = Some(pid);
+                                if !matching_pending || self.active_roblox_started_at.is_none() {
+                                    self.active_roblox_started_at = Some(now_unix_ms() / 1000);
+                                }
+                            }
+                            None => {
+                                self.active_roblox_place_id = None;
+                                self.active_roblox_started_at = None;
+                            }
+                        }
+                        self.sync_discord_presence();
+                    }
+                }
+                Msg::DiscordGameResolved(pid, resolved) => {
+                    self.discord_resolving_places.remove(&pid);
+                    if let Some((g, icon_url)) = resolved {
+                        self.request_thumbs(vec![g.universe_id]);
+                        self.discord_resolved_games.insert(pid, (g, icon_url));
+                        self.sync_discord_presence();
+                    }
+                }
+                Msg::TrayAction(ev) => match ev {
+                    TrayEvent::ShowAndFocus => self.restore_from_tray(),
+                    TrayEvent::HideToTray => {
+                        let ctx = self.ctx.clone();
+                        self.hide_to_tray(&ctx, false);
+                    }
+                    TrayEvent::OpenSettings => {
+                        self.restore_from_tray();
+                        if self.cookie.is_some() {
+                            self.page = Page::Settings;
+                            self.sync_discord_presence();
+                        }
+                        self.sync_tray_state();
+                    }
+                    TrayEvent::ToggleDiscordRpc => {
+                        self.settings.discord_rpc_enabled = !self.settings.discord_rpc_enabled;
+                        save_settings(&self.settings);
+                        self.sync_discord_presence();
+                        self.sync_tray_state();
+                    }
+                    TrayEvent::CheckUpdates => {
+                        self.restore_from_tray();
+                        self.check_app_updates(true);
+                        self.sync_tray_state();
+                    }
+                    TrayEvent::QuitApp => self.quit_app(),
                 }
                 Msg::RobloxBackgroundDetected { pid, is_playing } => {
                     if !is_playing
@@ -2280,6 +2431,12 @@ impl RustBlox {
                         }
                     }
                 }
+            }
+        }
+        if let Some((_, _, started)) = self.pending_discord_launch {
+            if started.elapsed() >= Duration::from_secs(20) {
+                self.pending_discord_launch = None;
+                self.sync_discord_presence();
             }
         }
         had_messages
@@ -2559,6 +2716,7 @@ impl RustBlox {
             }
             ManualGameIntent::Play => {
                 self.record_recent_game(resolved.game.clone());
+                self.note_discord_game_launch(resolved.place_id, Some(resolved.game.clone()));
                 if let Some(code) = resolved.private_server_code {
                     self.status = format!("Joining private server for {}...", resolved.game.name);
                     self.launch_private_server(resolved.place_id, code);
@@ -2575,6 +2733,7 @@ impl RustBlox {
             return;
         }
         self.status = "Getting launch ticket...".to_string();
+        self.note_discord_game_launch(g.place_id, Some(g.clone()));
         self.launch_place_id(g.place_id);
         self.record_recent_game(g.clone());
     }
@@ -2872,6 +3031,257 @@ impl RustBlox {
         });
     }
 
+    pub fn apply_runtime_resource_limits(&mut self, manual_trim: bool) {
+        crate::telemetry::apply_resource_limits(
+            self.settings.ram_limit_mb,
+            self.settings.cpu_limit_pct,
+        );
+        self.enforce_ram_cache_budget(manual_trim);
+    }
+
+    pub fn enforce_ram_cache_budget(&mut self, manual_trim: bool) {
+        let max_videos = crate::telemetry::max_video_cache_for_ram_limit(self.settings.ram_limit_mb);
+        if manual_trim {
+            self.active_video_texture = None;
+            self.decoded_videos.clear();
+            self.video_lru.clear();
+            self.requested.clear();
+            self.last_ram_trim_check = Some(Instant::now());
+            let _ = crate::telemetry::trim_process_memory();
+            if let Some(mb) = crate::telemetry::current_process_ram_mb() {
+                self.status = format!("Trimmed RustBlox RAM ({mb:.0} MB in use)");
+            } else {
+                self.status = "Trimmed RustBlox RAM caches".to_string();
+            }
+            return;
+        }
+
+        while self.video_lru.len() > max_videos {
+            if let Some(old_vid) = self.video_lru.pop() {
+                self.decoded_videos.remove(&old_vid);
+            }
+        }
+
+        if let Some(cap_mb) = self.settings.ram_limit_mb {
+            let now = Instant::now();
+            let due = self
+                .last_ram_trim_check
+                .map(|t| now.saturating_duration_since(t) >= Duration::from_secs(12))
+                .unwrap_or(true);
+            if due {
+                self.last_ram_trim_check = Some(now);
+                if crate::telemetry::current_process_ram_mb()
+                    .is_some_and(|used| used > cap_mb as f32)
+                {
+                    let keep = max_videos.min(1);
+                    while self.video_lru.len() > keep {
+                        if let Some(old_vid) = self.video_lru.pop() {
+                            self.decoded_videos.remove(&old_vid);
+                        }
+                    }
+                    let _ = crate::telemetry::trim_process_memory();
+                }
+            }
+        }
+    }
+
+    pub fn note_discord_game_launch(&mut self, place_id: u64, game: Option<Game>) {
+        if place_id == 0 {
+            return;
+        }
+        let resolved_game = game.or_else(|| self.find_known_game_by_place(place_id));
+        if let Some(ref g) = resolved_game {
+            self.request_thumbs(vec![g.universe_id]);
+        }
+        self.pending_discord_launch = Some((place_id, resolved_game, Instant::now()));
+        if self.active_roblox_started_at.is_none() {
+            self.active_roblox_started_at = Some(now_unix_ms() / 1000);
+        }
+        self.sync_discord_presence();
+    }
+
+    pub fn sync_discord_presence(&mut self) {
+        self.sync_tray_state();
+        let cfg = DiscordRpcConfig {
+            enabled: self.settings.discord_rpc_enabled,
+            show_launcher_idle: self.settings.discord_rpc_show_idle,
+            app_id: self.settings.discord_rpc_app_id.clone(),
+        };
+        if !cfg.enabled {
+            self.discord_rpc.sync(cfg, None);
+            return;
+        }
+
+        let active_place = self.active_roblox_place_id.or_else(|| {
+            self.pending_discord_launch
+                .as_ref()
+                .and_then(|(pid, _, started)| {
+                    (started.elapsed() < Duration::from_secs(20)).then_some(*pid)
+                })
+        });
+
+        if let Some(pid) = active_place {
+            let cached = self.discord_resolved_games.get(&pid).cloned();
+            let known_game = cached
+                .as_ref()
+                .map(|(g, _)| g.clone())
+                .or_else(|| self.find_known_game_by_place(pid))
+                .or_else(|| {
+                    self.pending_discord_launch
+                        .as_ref()
+                        .and_then(|(p, g, _)| (*p == pid).then(|| g.clone()).flatten())
+                });
+
+            let icon_url = cached.and_then(|(_, u)| u).or_else(|| {
+                known_game
+                    .as_ref()
+                    .and_then(|g| self.icon.get(&g.universe_id).cloned())
+            });
+
+            if (known_game.is_none() || icon_url.is_none())
+                && self.discord_resolving_places.insert(pid)
+            {
+                self.spawn(move || {
+                    Msg::DiscordGameResolved(pid, resolve_game_and_icon_by_place(pid))
+                });
+            }
+
+            let details = known_game
+                .as_ref()
+                .map(|g| g.name.clone())
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "Playing Roblox".to_string());
+            let state = match known_game.as_ref() {
+                Some(g) if !g.creator.trim().is_empty() => format!("By {}", g.creator),
+                _ if self.active_roblox_place_id.is_none() => "Launching via RustBlox".to_string(),
+                _ => "In-game via RustBlox".to_string(),
+            };
+            let large_text = known_game
+                .as_ref()
+                .map(|g| g.name.clone())
+                .filter(|s| !s.trim().is_empty());
+            let start_epoch_secs = self
+                .active_roblox_started_at
+                .unwrap_or_else(|| now_unix_ms() / 1000);
+
+            self.discord_rpc.sync(
+                cfg,
+                Some(DiscordActivity {
+                    details,
+                    state,
+                    start_epoch_secs,
+                    large_image: icon_url,
+                    large_text,
+                    small_image: None,
+                    small_text: None,
+                    button_label: Some("Open on Roblox".to_string()),
+                    button_url: Some(format!("https://www.roblox.com/games/{pid}")),
+                }),
+            );
+            return;
+        }
+
+        if cfg.show_launcher_idle && self.cookie.is_some() {
+            let (state, large_image, large_text) = match &self.page {
+                Page::Game(g) => (
+                    format!("Viewing {}", g.name),
+                    self.icon.get(&g.universe_id).cloned(),
+                    Some(g.name.clone()),
+                ),
+                Page::Home => ("Home".to_string(), None, None),
+                Page::Charts => ("Charts".to_string(), None, None),
+                Page::Search => ("Searching games".to_string(), None, None),
+                Page::Avatar => ("Customizing Avatar".to_string(), None, None),
+                Page::Profile | Page::Friend(_) => ("Viewing Profile".to_string(), None, None),
+                Page::AddFriend => ("Adding Friends".to_string(), None, None),
+                Page::Notifications => ("Notifications".to_string(), None, None),
+                Page::Settings => ("Settings".to_string(), None, None),
+                Page::Login => ("Signing in".to_string(), None, None),
+            };
+            self.discord_rpc.sync(
+                cfg,
+                Some(DiscordActivity {
+                    details: "Browsing RustBlox".to_string(),
+                    state,
+                    start_epoch_secs: self.app_started_epoch_secs,
+                    large_image,
+                    large_text,
+                    small_image: None,
+                    small_text: None,
+                    button_label: None,
+                    button_url: None,
+                }),
+            );
+        } else {
+            self.discord_rpc.sync(cfg, None);
+        }
+    }
+
+    pub fn tray_state_snapshot(&self) -> TrayState {
+        let playing_name = self.active_roblox_place_id.map(|pid| {
+            self.discord_resolved_games
+                .get(&pid)
+                .map(|(g, _)| g.name.clone())
+                .or_else(|| self.find_known_game_by_place(pid).map(|g| g.name))
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "Roblox".to_string())
+        });
+        let user_tag = self.me.as_ref().map(|p| format!("@{}", p.user.name));
+        let status_line = match (&playing_name, &user_tag) {
+            (Some(game), _) => format!("Playing: {game}"),
+            (None, Some(user)) => format!("Signed in: {user}"),
+            (None, None) => "Not signed in".to_string(),
+        };
+        let tooltip = match (&playing_name, &user_tag) {
+            (Some(game), Some(user)) => format!("RustBlox ({user}) — Playing {game}"),
+            (Some(game), None) => format!("RustBlox — Playing {game}"),
+            (None, Some(user)) => format!("RustBlox — {user}"),
+            (None, None) => "RustBlox".to_string(),
+        };
+        TrayState {
+            enabled: self.settings.tray_enabled,
+            window_visible: self.window_visible,
+            status_line,
+            tooltip,
+            discord_rpc_enabled: self.settings.discord_rpc_enabled,
+        }
+    }
+
+    pub fn sync_tray_state(&self) {
+        self.tray.sync(self.tray_state_snapshot());
+    }
+
+    pub fn hide_to_tray(&mut self, ctx: &egui::Context, show_balloon: bool) {
+        self.window_visible = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        self.sync_tray_state();
+        if show_balloon && self.settings.tray_enabled {
+            self.tray.show_balloon(
+                "RustBlox is still running",
+                "Minimized to the system tray. Right-click the icon to quit.",
+            );
+        }
+    }
+
+    pub fn restore_from_tray(&mut self) {
+        self.window_visible = true;
+        self.pending_start_in_tray_frames = 0;
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        self.ctx.request_repaint();
+        self.sync_tray_state();
+    }
+
+    pub fn quit_app(&mut self) {
+        self.allow_close_exit = true;
+        self.tray.shutdown();
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        self.ctx.request_repaint();
+    }
+
     pub fn paint_app_background(&self, ctx: &egui::Context) {
         if self.settings.bg_mode == BgMode::ThemeDefault {
             return;
@@ -2936,6 +3346,24 @@ impl eframe::App for RustBlox {
         if self.poll() {
             ui.ctx().request_repaint();
         }
+        if self.pending_start_in_tray_frames > 0 {
+            self.pending_start_in_tray_frames -= 1;
+            if self.pending_start_in_tray_frames == 0 {
+                self.hide_to_tray(ui.ctx(), false);
+            } else {
+                ui.ctx().request_repaint();
+            }
+        }
+        if ui.ctx().input(|i| i.viewport().close_requested())
+            && !self.allow_close_exit
+            && self.settings.tray_enabled
+            && self.settings.tray_minimize_on_close
+        {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            let show_tip = !self.tray_minimize_balloon_shown;
+            self.tray_minimize_balloon_shown = true;
+            self.hide_to_tray(ui.ctx(), show_tip);
+        }
         if !self.update_checked {
             self.update_checked = true;
             self.check_updates(false);
@@ -2988,6 +3416,7 @@ impl eframe::App for RustBlox {
         let mut do_search = false;
         let mut toggle_theme = false;
         let mut refresh_auth = false;
+        let mut tele_actions = crate::telemetry::TelemetryActions::default();
 
         // Left sidebar (only shown when logged in)
         if logged_in {
@@ -2999,7 +3428,7 @@ impl eframe::App for RustBlox {
             egui::Panel::left("nav")
                 .resizable(false)
                 .exact_size(78.0)
-                .show_separator_line(false)
+                .show_separator_line(self.settings.glass_edition)
                 .frame(egui::Frame::new().fill(chrome_fill).inner_margin(4))
                 .show(ui, |ui| {
                     ui.add_space(10.0);
@@ -3031,7 +3460,7 @@ impl eframe::App for RustBlox {
                     }
                     ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                         ui.add_space(6.0);
-                        crate::telemetry::draw_sidebar_telemetry(ui);
+                        tele_actions = crate::telemetry::draw_sidebar_telemetry(ui, &mut self.settings);
                     });
                 });
         }
@@ -3039,7 +3468,7 @@ impl eframe::App for RustBlox {
         // Top bar
         egui::Panel::top("top")
             .resizable(false)
-            .show_separator_line(false)
+            .show_separator_line(self.settings.glass_edition)
             .frame(
                 egui::Frame::new()
                     .fill(chrome_fill)
@@ -3486,6 +3915,14 @@ impl eframe::App for RustBlox {
         if refresh_auth {
             self.sync_auth_session(true);
         }
+        if tele_actions.settings_changed {
+            save_settings(&self.settings);
+        }
+        if tele_actions.settings_changed || tele_actions.trim_ram_requested {
+            self.apply_runtime_resource_limits(tele_actions.trim_ram_requested);
+        } else {
+            self.enforce_ram_cache_budget(false);
+        }
 
         if logged_in {
             self.render_manual_game_modal(ui.ctx());
@@ -3502,6 +3939,11 @@ impl eframe::App for RustBlox {
         self.handle_game_hover(hovered_game, ui.ctx());
 
         // Apply clicks after drawing
+        let prev_page_disc = std::mem::discriminant(&self.page);
+        let prev_page_game_id = match &self.page {
+            Page::Game(g) => Some(g.universe_id),
+            _ => None,
+        };
         for a in acts {
             match a {
                 Action::HoverGame(_) => {}
@@ -3887,6 +4329,7 @@ impl eframe::App for RustBlox {
                 Action::JoinServer(pid, job_id) => {
                     self.status = "Getting launch ticket for server...".to_string();
                     self.record_recent_place_id(pid);
+                    self.note_discord_game_launch(pid, None);
                     self.launch_server(pid, job_id);
                 }
                 Action::VoteGame(uid, vote) => {
@@ -4069,19 +4512,21 @@ impl eframe::App for RustBlox {
                 Action::JoinPlace(pid) => {
                     self.status = "Joining friend...".to_string();
                     self.record_recent_place_id(pid);
+                    self.note_discord_game_launch(pid, None);
                     self.launch_place_id(pid);
                 }
                 Action::JoinPrivateServer(pid, code) => {
                     self.status = "Joining private server...".to_string();
-                    if let Page::Game(g) = &self.page {
-                        if g.place_id == pid {
-                            self.record_recent_game(g.clone());
-                        } else {
-                            self.record_recent_place_id(pid);
-                        }
+                    let known_game = match &self.page {
+                        Page::Game(g) if g.place_id == pid => Some(g.clone()),
+                        _ => None,
+                    };
+                    if let Some(ref g) = known_game {
+                        self.record_recent_game(g.clone());
                     } else {
                         self.record_recent_place_id(pid);
                     }
+                    self.note_discord_game_launch(pid, known_game);
                     self.launch_private_server(pid, code);
                 }
                 Action::OpenManualGame => {
@@ -4096,11 +4541,22 @@ impl eframe::App for RustBlox {
         if do_search && self.cookie.is_some() {
             self.start_search();
         }
+        let next_page_game_id = match &self.page {
+            Page::Game(g) => Some(g.universe_id),
+            _ => None,
+        };
+        if std::mem::discriminant(&self.page) != prev_page_disc
+            || next_page_game_id != prev_page_game_id
+        {
+            self.sync_discord_presence();
+        }
     }
 
     fn on_exit(&mut self) {
         self.watcher_stop.store(true, Ordering::Relaxed);
         self.auto_close_flag.store(false, Ordering::Relaxed);
+        self.tray.shutdown();
+        self.discord_rpc.shutdown();
         if self.settings.auto_close_roblox {
             close_tray_roblox_processes();
         }

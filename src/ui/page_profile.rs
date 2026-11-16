@@ -252,10 +252,7 @@ impl RustBlox {
         more_resp.context_menu(|ui| {
             self.render_profile_more_menu(ui, profile, is_self, acts);
         });
-        if more_resp.clicked() {
-            egui::Popup::toggle_id(ui.ctx(), more_resp.id.with("menu"));
-        }
-        egui::Popup::from_response(&more_resp)
+        egui::Popup::menu(&more_resp)
             .id(more_resp.id.with("menu"))
             .show(|ui| {
                 ui.set_min_width(160.0);
