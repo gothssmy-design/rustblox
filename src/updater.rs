@@ -14,7 +14,7 @@ use eframe::egui::{self, Color32, CornerRadius, RichText, Sense};
 use serde_json::Value;
 
 use crate::auth::load_settings;
-use crate::theme::{apply_theme, install_fonts, pal, theme_accent};
+use crate::theme::{apply_theme, install_fonts, theme_accent};
 
 pub const RUSTBLOX_REPO: &str = "gothssmy-design/rustblox";
 pub const RUSTBLOX_RELEASES_URL: &str = "https://github.com/gothssmy-design/rustblox/releases";
@@ -624,9 +624,20 @@ impl RustBloxUpdaterApp {
     }
 }
 
+const UPDATER_BG_BLACK_LIGHT: Color32 = Color32::from_rgb(27, 30, 36);
+const UPDATER_BORDER_COLOR: Color32 = Color32::from_rgb(52, 57, 68);
+const UPDATER_TRACK_COLOR: Color32 = Color32::from_rgb(44, 49, 59);
+const UPDATER_TEXT_COLOR: Color32 = Color32::from_rgb(242, 244, 248);
+const UPDATER_MUTED_COLOR: Color32 = Color32::from_rgb(164, 171, 184);
+
 impl eframe::App for RustBloxUpdaterApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
+        [
+            UPDATER_BG_BLACK_LIGHT.r() as f32 / 255.0,
+            UPDATER_BG_BLACK_LIGHT.g() as f32 / 255.0,
+            UPDATER_BG_BLACK_LIGHT.b() as f32 / 255.0,
+            1.0,
+        ]
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -634,7 +645,6 @@ impl eframe::App for RustBloxUpdaterApp {
             self.start_worker(ui.ctx());
         }
 
-        let p = pal(ui);
         let settings = load_settings();
         let accent = theme_accent(&settings);
         let phase = self
@@ -663,18 +673,17 @@ impl eframe::App for RustBloxUpdaterApp {
         };
         self.smooth_progress += (target_frac - self.smooth_progress) * (dt * 9.0).clamp(0.0, 1.0);
 
-        let card_rect = screen.shrink(4.0);
         let painter = ui.painter();
-        painter.rect_filled(card_rect, CornerRadius::same(14), p.bg);
+        painter.rect_filled(screen, CornerRadius::ZERO, UPDATER_BG_BLACK_LIGHT);
         painter.rect_stroke(
-            card_rect,
-            CornerRadius::same(14),
-            egui::Stroke::new(1.0, p.border),
+            screen.shrink(0.5),
+            CornerRadius::ZERO,
+            egui::Stroke::new(1.0, UPDATER_BORDER_COLOR),
             egui::StrokeKind::Inside,
         );
 
         let drag_resp = ui.interact(
-            card_rect,
+            screen,
             ui.scope_id().with("updater_drag"),
             Sense::drag(),
         );
@@ -683,14 +692,18 @@ impl eframe::App for RustBloxUpdaterApp {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(22)))
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(22, 16)))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let close_btn = ui.add(
-                            egui::Button::new(RichText::new("×").size(14.0).color(p.muted))
-                                .fill(Color32::TRANSPARENT)
-                                .stroke(egui::Stroke::NONE),
+                            egui::Button::new(
+                                RichText::new("\u{00D7}")
+                                    .size(15.0)
+                                    .color(UPDATER_MUTED_COLOR),
+                            )
+                            .fill(Color32::TRANSPARENT)
+                            .stroke(egui::Stroke::NONE),
                         );
                         if close_btn.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                             self.cancelled.store(true, Ordering::Relaxed);
@@ -701,12 +714,12 @@ impl eframe::App for RustBloxUpdaterApp {
 
                 ui.vertical_centered(|ui| {
                     let (logo_wrap, _) =
-                        ui.allocate_exact_size(egui::vec2(62.0, 62.0), Sense::hover());
+                        ui.allocate_exact_size(egui::vec2(58.0, 58.0), Sense::hover());
                     let pulse = 0.5 + 0.5 * (t * 2.4).sin();
                     let halo_alpha = (18.0 + pulse * 18.0) as u8;
                     ui.painter().circle_filled(
                         logo_wrap.center(),
-                        30.0,
+                        28.0,
                         Color32::from_rgba_unmultiplied(
                             accent.r(),
                             accent.g(),
@@ -715,7 +728,7 @@ impl eframe::App for RustBloxUpdaterApp {
                         ),
                     );
                     let logo_rect =
-                        egui::Rect::from_center_size(logo_wrap.center(), egui::vec2(46.0, 46.0));
+                        egui::Rect::from_center_size(logo_wrap.center(), egui::vec2(44.0, 44.0));
                     egui::Image::new(egui::include_image!("../assets/logo.png"))
                         .corner_radius(10)
                         .paint_at(ui, logo_rect);
@@ -725,26 +738,28 @@ impl eframe::App for RustBloxUpdaterApp {
                         RichText::new("Updating RustBlox")
                             .size(18.0)
                             .strong()
-                            .color(p.text),
+                            .color(UPDATER_TEXT_COLOR),
                     );
-                    ui.add_space(2.0);
+                    ui.add_space(3.0);
                     ui.label(
                         RichText::new(format!("v{}  ->  v{}", self.args.from_ver, self.args.to_ver))
-                            .size(12.0)
-                            .color(p.muted),
+                            .size(12.5)
+                            .color(UPDATER_MUTED_COLOR),
                     );
 
-                    ui.add_space(16.0);
+                    ui.add_space(18.0);
 
                     match &phase {
                         UpdaterPhase::Failed(err) => {
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(err).size(11.5).color(Color32::from_rgb(248, 113, 113)),
+                                    RichText::new(err)
+                                        .size(11.5)
+                                        .color(Color32::from_rgb(248, 113, 113)),
                                 )
                                 .wrap(),
                             );
-                            ui.add_space(10.0);
+                            ui.add_space(12.0);
                             ui.horizontal(|ui| {
                                 if ui.button("Retry").clicked() {
                                     self.start_worker(ui.ctx());
@@ -756,11 +771,11 @@ impl eframe::App for RustBloxUpdaterApp {
                         }
                         _ => {
                             let (bar_rect, _) =
-                                ui.allocate_exact_size(egui::vec2(280.0, 7.0), Sense::hover());
+                                ui.allocate_exact_size(egui::vec2(296.0, 7.0), Sense::hover());
                             ui.painter().rect_filled(
                                 bar_rect,
                                 CornerRadius::same(4),
-                                p.surface_bg,
+                                UPDATER_TRACK_COLOR,
                             );
                             let fill_w = (bar_rect.width() * self.smooth_progress).max(8.0);
                             let fill_rect = egui::Rect::from_min_size(
@@ -769,7 +784,7 @@ impl eframe::App for RustBloxUpdaterApp {
                             );
                             ui.painter().rect_filled(fill_rect, CornerRadius::same(4), accent);
 
-                            ui.add_space(8.0);
+                            ui.add_space(10.0);
                             let status_txt = match phase {
                                 UpdaterPhase::Downloading => {
                                     let done = self.downloaded.load(Ordering::Relaxed);
@@ -790,7 +805,14 @@ impl eframe::App for RustBloxUpdaterApp {
                                 UpdaterPhase::Launching => "Starting RustBlox...".to_string(),
                                 UpdaterPhase::Failed(_) => String::new(),
                             };
-                            ui.label(RichText::new(status_txt).size(11.5).color(p.muted));
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(status_txt)
+                                        .size(12.0)
+                                        .color(UPDATER_MUTED_COLOR),
+                                )
+                                .wrap(),
+                            );
                         }
                     }
                 });
@@ -805,9 +827,9 @@ impl eframe::App for RustBloxUpdaterApp {
 pub fn run_updater_window(args: UpdaterArgs) -> eframe::Result<()> {
     let settings = load_settings();
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([392.0, 246.0])
+        .with_inner_size([404.0, 290.0])
         .with_decorations(false)
-        .with_transparent(true)
+        .with_transparent(false)
         .with_resizable(false);
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../assets/logo.png")) {
         viewport = viewport.with_icon(icon);
