@@ -427,7 +427,13 @@ impl RustBlox {
                         }
                         if ui.button("Re-scan").clicked() {
                             self.player_path = find_player();
-                            self.status = "Checked Roblox installation".to_string();
+                            self.roblox_update_available = None;
+                            if let Some(ref p) = self.player_path {
+                                self.status = format!("Found Roblox at {}", p.display());
+                                self.check_updates(false);
+                            } else {
+                                self.status = "RobloxPlayerBeta.exe was not found.".to_string();
+                            }
                         }
                         if ui.button("Check Update").clicked() {
                             self.check_updates(true);
@@ -441,6 +447,14 @@ impl RustBlox {
                     ui.add_space(4.0);
                     if ui.button("Re-scan").clicked() {
                         self.player_path = find_player();
+                        self.roblox_update_available = None;
+                        if let Some(ref p) = self.player_path {
+                            self.status = format!("Found Roblox at {}", p.display());
+                            self.check_updates(false);
+                        } else {
+                            self.status =
+                                "RobloxPlayerBeta.exe was still not found on this PC.".to_string();
+                        }
                     }
                 }
             });

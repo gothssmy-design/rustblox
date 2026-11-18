@@ -789,6 +789,7 @@ impl RustBlox {
 
     pub fn load_avatar_3d(&mut self) {
         if self.avatar_3d.loading {
+            self.avatar_3d.reload_pending = true;
             return;
         }
         let Some(uid) = self.me.as_ref().map(|p| p.user.id) else {
@@ -796,6 +797,7 @@ impl RustBlox {
         };
         let cookie = self.cookie.clone();
         self.avatar_3d.loading = true;
+        self.avatar_3d.reload_pending = false;
         self.avatar_3d.err = None;
         self.spawn(move || {
             let res = load_avatar_3d_data(uid, cookie.as_deref());
@@ -1981,7 +1983,6 @@ impl RustBlox {
                             }
                             if seq == self.avatar_seq {
                                 self.status = note;
-                                self.avatar_3d.loaded_user_id = None;
                                 self.load_avatar_3d();
                             }
                         }
@@ -1998,6 +1999,12 @@ impl RustBlox {
                     self.avatar_3d.loading = false;
                     match res {
                         Ok((model, raw_textures)) => {
+                            let is_new_view = self.avatar_3d.model.is_none()
+                                || self.avatar_3d.loaded_user_id != Some(uid);
+                            if is_new_view {
+                                self.avatar_3d.yaw = model.default_yaw;
+                                self.avatar_3d.pitch = 0.05;
+                            }
                             self.avatar_3d.loaded_user_id = Some(uid);
                             self.avatar_3d.model = Some(model);
                             self.avatar_3d.err = None;
@@ -2021,6 +2028,9 @@ impl RustBlox {
                         Err(e) => {
                             self.avatar_3d.err = Some(e);
                         }
+                    }
+                    if std::mem::take(&mut self.avatar_3d.reload_pending) {
+                        self.load_avatar_3d();
                     }
                 }
                 Msg::AuthSession(r) => {

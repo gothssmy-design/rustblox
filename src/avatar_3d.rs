@@ -70,6 +70,7 @@ pub struct Avatar3DModel {
     pub triangles: Vec<AvatarTriangle>,
     pub center: [f32; 3],
     pub scale: f32,
+    pub default_yaw: f32,
     pub texture_hashes: Vec<String>,
 }
 
@@ -89,6 +90,7 @@ pub struct Avatar3DState {
     pub model: Option<Avatar3DModel>,
     pub textures: Vec<LoadedTexture>,
     pub loading: bool,
+    pub reload_pending: bool,
     pub err: Option<String>,
     pub loaded_user_id: Option<u64>,
 }
@@ -106,10 +108,71 @@ impl Default for Avatar3DState {
             model: None,
             textures: Vec::new(),
             loading: false,
+            reload_pending: false,
             err: None,
             loaded_user_id: None,
         }
     }
+}
+
+/// Resolve 1-based positive or relative negative Wavefront OBJ indices safely.
+fn resolve_obj_index(tok: &str, len: usize) -> Option<usize> {
+    let idx = tok.trim().parse::<isize>().ok()?;
+    if idx > 0 {
+        let u = (idx - 1) as usize;
+        (u < len).then_some(u)
+    } else if idx < 0 {
+        let back = (-idx) as usize;
+        len.checked_sub(back)
+    } else {
+        None
+    }
+}
+
+fn parse_manifest_vec3(v: &Value) -> Option<[f32; 3]> {
+    if let Some(arr) = v.as_array() {
+        if arr.len() >= 3 {
+            return Some([
+                arr[0].as_f64()? as f32,
+                arr[1].as_f64()? as f32,
+                arr[2].as_f64()? as f32,
+            ]);
+        }
+    }
+    let x = v["x"].as_f64()? as f32;
+    let y = v["y"].as_f64()? as f32;
+    let z = v["z"].as_f64()? as f32;
+    Some([x, y, z])
+}
+
+/// Derive the default camera yaw so the manifest thumbnail camera faces the viewer (`-Z`).
+pub fn compute_manifest_default_yaw(manifest: &Value, fallback_center: [f32; 3]) -> f32 {
+    let center = match (
+        parse_manifest_vec3(&manifest["aabb"]["min"]),
+        parse_manifest_vec3(&manifest["aabb"]["max"]),
+    ) {
+        (Some(mn), Some(mx)) => [
+            (mn[0] + mx[0]) * 0.5,
+            (mn[1] + mx[1]) * 0.5,
+            (mn[2] + mx[2]) * 0.5,
+        ],
+        _ => fallback_center,
+    };
+
+    if let Some(cam_pos) = parse_manifest_vec3(&manifest["camera"]["position"]) {
+        let dx = cam_pos[0] - center[0];
+        let dz = cam_pos[2] - center[2];
+        if dx * dx + dz * dz > 1e-4 {
+            return dx.atan2(-dz);
+        }
+    }
+    if let Some(cam_dir) = parse_manifest_vec3(&manifest["camera"]["direction"]) {
+        // Roblox avatar-3d manifest `direction` points from target toward the camera.
+        if cam_dir[0] * cam_dir[0] + cam_dir[2] * cam_dir[2] > 1e-4 {
+            return cam_dir[0].atan2(-cam_dir[2]);
+        }
+    }
+    DEFAULT_YAW
 }
 
 /// Material definition parsed from MTL file
@@ -132,8 +195,9 @@ pub fn parse_avatar_3d(
     if let Some(mb) = mtl_bytes {
         let mtl_str = String::from_utf8_lossy(mb);
         let mut cur_name = String::new();
-        let mut cur_tex = None;
-        let mut cur_col = Color32::from_rgb(210, 210, 215);
+        let mut cur_tex: Option<String> = None;
+        let mut cur_rgb = [210u8, 210u8, 215u8];
+        let mut cur_alpha = 255u8;
 
         for line in mtl_str.lines() {
             let line = line.trim();
@@ -142,25 +206,52 @@ pub fn parse_avatar_3d(
                     materials.push(MaterialDef {
                         name: cur_name.clone(),
                         texture_hash: cur_tex.take(),
-                        color: cur_col,
+                        color: Color32::from_rgba_unmultiplied(
+                            cur_rgb[0], cur_rgb[1], cur_rgb[2], cur_alpha,
+                        ),
                     });
                 }
                 cur_name = line["newmtl ".len()..].trim().to_string();
-                cur_col = Color32::from_rgb(210, 210, 215);
+                cur_tex = None;
+                cur_rgb = [210, 210, 215];
+                cur_alpha = 255;
             } else if line.starts_with("Kd ") {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 4 {
                     let r = parts[1].parse::<f32>().unwrap_or(0.8);
                     let g = parts[2].parse::<f32>().unwrap_or(0.8);
                     let b = parts[3].parse::<f32>().unwrap_or(0.8);
-                    cur_col = Color32::from_rgb(
+                    cur_rgb = [
                         (r.clamp(0.0, 1.0) * 255.0) as u8,
                         (g.clamp(0.0, 1.0) * 255.0) as u8,
                         (b.clamp(0.0, 1.0) * 255.0) as u8,
-                    );
+                    ];
                 }
-            } else if line.starts_with("map_Kd ") || line.starts_with("map_Ka ") {
-                let tex = line.split_whitespace().nth(1).unwrap_or("").trim();
+            } else if line.starts_with("d ") {
+                if let Some(v) = line.split_whitespace().nth(1).and_then(|s| s.parse::<f32>().ok()) {
+                    cur_alpha = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+            } else if line.starts_with("Tr ") {
+                if let Some(v) = line.split_whitespace().nth(1).and_then(|s| s.parse::<f32>().ok()) {
+                    cur_alpha = ((1.0 - v).clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+            } else if line.starts_with("map_Kd ") {
+                let tex = line
+                    .split_whitespace()
+                    .last()
+                    .unwrap_or("")
+                    .trim_matches('"')
+                    .trim();
+                if !tex.is_empty() {
+                    cur_tex = Some(tex.to_string());
+                }
+            } else if line.starts_with("map_Ka ") && cur_tex.is_none() {
+                let tex = line
+                    .split_whitespace()
+                    .last()
+                    .unwrap_or("")
+                    .trim_matches('"')
+                    .trim();
                 if !tex.is_empty() {
                     cur_tex = Some(tex.to_string());
                 }
@@ -170,7 +261,9 @@ pub fn parse_avatar_3d(
             materials.push(MaterialDef {
                 name: cur_name,
                 texture_hash: cur_tex,
-                color: cur_col,
+                color: Color32::from_rgba_unmultiplied(
+                    cur_rgb[0], cur_rgb[1], cur_rgb[2], cur_alpha,
+                ),
             });
         }
     }
@@ -191,7 +284,7 @@ pub fn parse_avatar_3d(
     let mut uvs: Vec<[f32; 2]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
 
-    let mut current_mtl_idx = 0usize;
+    let mut current_mtl_idx: Option<usize> = None;
     let mut triangles: Vec<AvatarTriangle> = Vec::new();
 
     let mut min_pos = [f32::MAX, f32::MAX, f32::MAX];
@@ -248,9 +341,7 @@ pub fn parse_avatar_3d(
             }
         } else if line.starts_with("usemtl ") {
             let mtl_name = line["usemtl ".len()..].trim();
-            if let Some(pos) = materials.iter().position(|m| m.name == mtl_name) {
-                current_mtl_idx = pos;
-            }
+            current_mtl_idx = materials.iter().position(|m| m.name == mtl_name);
         } else if line.starts_with("f ") {
             let face_tokens: Vec<&str> = line.split_whitespace().skip(1).collect();
             if face_tokens.len() < 3 {
@@ -258,42 +349,19 @@ pub fn parse_avatar_3d(
             }
 
             let parse_vertex = |tok: &str| -> AvatarVertex {
-                let sub: Vec<&str> = tok.split('/').collect();
-                let v_idx = sub.get(0).and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
-                let vt_idx = sub.get(1).and_then(|s| s.parse::<usize>().ok());
-                let vn_idx = sub.get(2).and_then(|s| s.parse::<usize>().ok());
+                let mut parts = tok.split('/');
+                let v_tok = parts.next().unwrap_or("");
+                let vt_tok = parts.next().unwrap_or("");
+                let vn_tok = parts.next().unwrap_or("");
 
-                let pos = if v_idx > 0 && v_idx <= positions.len() {
-                    positions[v_idx - 1]
-                } else {
-                    [0.0, 0.0, 0.0]
-                };
+                let v_idx = resolve_obj_index(v_tok, positions.len());
+                let vt_idx = resolve_obj_index(vt_tok, uvs.len());
+                let vn_idx = resolve_obj_index(vn_tok, normals.len());
 
-                let col = if v_idx > 0 && v_idx <= colors.len() {
-                    colors[v_idx - 1]
-                } else {
-                    Color32::WHITE
-                };
-
-                let uv = if let Some(idx) = vt_idx {
-                    if idx > 0 && idx <= uvs.len() {
-                        uvs[idx - 1]
-                    } else {
-                        [0.0, 0.0]
-                    }
-                } else {
-                    [0.0, 0.0]
-                };
-
-                let norm = if let Some(idx) = vn_idx {
-                    if idx > 0 && idx <= normals.len() {
-                        normals[idx - 1]
-                    } else {
-                        [0.0, 0.0, 0.0]
-                    }
-                } else {
-                    [0.0, 0.0, 0.0]
-                };
+                let pos = v_idx.map(|i| positions[i]).unwrap_or([0.0, 0.0, 0.0]);
+                let col = v_idx.map(|i| colors[i]).unwrap_or(Color32::WHITE);
+                let uv = vt_idx.map(|i| uvs[i]).unwrap_or([0.0, 0.0]);
+                let norm = vn_idx.map(|i| normals[i]).unwrap_or([0.0, 0.0, 0.0]);
 
                 AvatarVertex {
                     pos,
@@ -304,7 +372,7 @@ pub fn parse_avatar_3d(
             };
 
             let v0 = parse_vertex(face_tokens[0]);
-            let (tex_idx, base_col) = if let Some(m) = materials.get(current_mtl_idx) {
+            let (tex_idx, base_col) = if let Some(m) = current_mtl_idx.and_then(|i| materials.get(i)) {
                 let tidx = m
                     .texture_hash
                     .as_ref()
@@ -313,13 +381,16 @@ pub fn parse_avatar_3d(
             } else {
                 (None, Color32::from_rgb(220, 220, 225))
             };
+            if base_col.a() == 0 {
+                continue;
+            }
 
             for i in 1..face_tokens.len() - 1 {
                 let mut v0_tri = v0.clone();
                 let mut v1 = parse_vertex(face_tokens[i]);
                 let mut v2 = parse_vertex(face_tokens[i + 1]);
 
-                // Calculate face normal
+                // Calculate geometric face normal
                 let edge1 = [
                     v1.pos[0] - v0_tri.pos[0],
                     v1.pos[1] - v0_tri.pos[1],
@@ -340,6 +411,17 @@ pub fn parse_avatar_3d(
                     fnorm[0] /= len;
                     fnorm[1] /= len;
                     fnorm[2] /= len;
+                }
+
+                // Align triangle winding with OBJ `vn` normals when present so frontfaces never cull
+                let avg_vn = [
+                    v0_tri.normal[0] + v1.normal[0] + v2.normal[0],
+                    v0_tri.normal[1] + v1.normal[1] + v2.normal[1],
+                    v0_tri.normal[2] + v1.normal[2] + v2.normal[2],
+                ];
+                if dot3(avg_vn, avg_vn) > 1e-6 && dot3(fnorm, avg_vn) < 0.0 {
+                    std::mem::swap(&mut v1, &mut v2);
+                    fnorm = [-fnorm[0], -fnorm[1], -fnorm[2]];
                 }
 
                 for vert in [&mut v0_tri, &mut v1, &mut v2] {
@@ -378,6 +460,7 @@ pub fn parse_avatar_3d(
         triangles,
         center,
         scale,
+        default_yaw: DEFAULT_YAW,
         texture_hashes,
     })
 }
@@ -388,26 +471,43 @@ pub fn load_avatar_3d_data(
     cookie: Option<&str>,
 ) -> Result<(Avatar3DModel, Vec<(String, Vec<u8>)>), String> {
     let url = format!("https://thumbnails.roblox.com/v1/users/avatar-3d?userId={user_id}");
-    let mut req = ureq::get(&url)
-        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-        .set("Referer", "https://www.roblox.com/");
-    if let Some(c) = cookie {
-        req = req.set("Cookie", &format!(".ROBLOSECURITY={c}"));
-    }
-    let resp = req
-        .call()
-        .map_err(|e| format!("avatar-3d API call error: {e}"))?;
-    let json: Value = resp
-        .into_json()
-        .map_err(|e| format!("manifest json error: {e}"))?;
+    let mut manifest_url: Option<String> = None;
+    let mut last_state = String::from("Pending");
 
-    let image_url = json["imageUrl"].as_str().ok_or_else(|| {
+    // Roblox often returns `state: "Pending"` with null `imageUrl` while generating the 3D bundle.
+    for attempt in 0..12 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(450));
+        }
+        let mut req = ureq::get(&url)
+            .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+            .set("Referer", "https://www.roblox.com/");
+        if let Some(c) = cookie {
+            req = req.set("Cookie", &format!(".ROBLOSECURITY={c}"));
+        }
+        let resp = req
+            .call()
+            .map_err(|e| format!("avatar-3d API call error: {e}"))?;
+        let json: Value = resp
+            .into_json()
+            .map_err(|e| format!("manifest json error: {e}"))?;
+
         let state = json["state"].as_str().unwrap_or("unknown");
-        format!("Avatar 3D thumbnail status: {state}")
-    })?;
+        last_state = state.to_string();
+        if let Some(u) = json["imageUrl"].as_str().filter(|s| !s.is_empty()) {
+            manifest_url = Some(u.to_string());
+            break;
+        }
+        if !matches!(state, "Pending" | "InReview") {
+            return Err(format!("Avatar 3D thumbnail status: {state}"));
+        }
+    }
+
+    let image_url =
+        manifest_url.ok_or_else(|| format!("Avatar 3D thumbnail status: {last_state}"))?;
 
     // Download manifest JSON from CDN
-    let manifest_resp = ureq::get(image_url)
+    let manifest_resp = ureq::get(&image_url)
         .set("User-Agent", "Mozilla/5.0")
         .call()
         .map_err(|e| format!("Manifest download error: {e}"))?;
@@ -447,7 +547,8 @@ pub fn load_avatar_3d_data(
         }
     }
 
-    let model = parse_avatar_3d(&obj_bytes, mtl_bytes.as_deref(), &tex_hashes)?;
+    let mut model = parse_avatar_3d(&obj_bytes, mtl_bytes.as_deref(), &tex_hashes)?;
+    model.default_yaw = compute_manifest_default_yaw(&manifest, model.center);
 
     Ok((model, raw_textures))
 }
@@ -611,7 +712,7 @@ pub fn render_avatar_3d_mesh(
         let dist = 4.8f32;
         let w = dist / (dist + fz);
 
-        let sx = center.x + fx * w * aspect_scale;
+        let sx = center.x - fx * w * aspect_scale;
         let sy = center.y - fy * w * aspect_scale + (viewport_rect.height() * 0.02);
 
         ([fx, fy, fz], Pos2::new(sx, sy), fz)
@@ -624,9 +725,9 @@ pub fn render_avatar_3d_mesh(
         let (t1, s1, z1) = transform_pt(tri.v[1].pos);
         let (t2, s2, z2) = transform_pt(tri.v[2].pos);
 
-        // 2D Cross product backface culling
+        // 2D Cross product backface culling (front-facing triangles under `sx = -fx` have negative cross_2d)
         let cross_2d = (s1.x - s0.x) * (s2.y - s0.y) - (s1.y - s0.y) * (s2.x - s0.x);
-        if cross_2d <= 0.0 {
+        if cross_2d >= 0.0 {
             continue; // Backface culled
         }
 
@@ -640,11 +741,35 @@ pub fn render_avatar_3d_mesh(
             let base = if has_tex {
                 None
             } else if vert.color != Color32::WHITE {
-                Some(vert.color)
+                Some(Color32::from_rgba_unmultiplied(
+                    vert.color.r(),
+                    vert.color.g(),
+                    vert.color.b(),
+                    tri.base_color.a(),
+                ))
             } else {
                 Some(tri.base_color)
             };
-            shade_studio_vertex(vp, vert.normal, tri.normal, cos_y, sin_y, cos_p, sin_p, base)
+            let shaded = shade_studio_vertex(
+                vp,
+                vert.normal,
+                tri.normal,
+                cos_y,
+                sin_y,
+                cos_p,
+                sin_p,
+                base,
+            );
+            if has_tex && tri.base_color.a() < 255 {
+                Color32::from_rgba_unmultiplied(
+                    shaded.r(),
+                    shaded.g(),
+                    shaded.b(),
+                    tri.base_color.a(),
+                )
+            } else {
+                shaded
+            }
         };
 
         let col0 = vert_col_for(&tri.v[0], t0);
@@ -681,28 +806,33 @@ pub fn render_avatar_3d_mesh(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Group triangles into textured egui Meshes
-    // Pre-allocate meshes for each texture slot + 1 untextured mesh
-    let mut mesh_tex: Vec<egui::Mesh> = Vec::new();
-    for tex in textures {
-        if let Some(h) = &tex.handle {
-            mesh_tex.push(egui::Mesh::with_texture(h.id()));
-        } else {
-            mesh_tex.push(egui::Mesh::default());
-        }
-    }
-    let mut mesh_default = egui::Mesh::default();
+    // Emit contiguous texture runs so back-to-front Painter's depth order is preserved across materials
+    let mut cur_tex_id: Option<egui::TextureId> = None;
+    let mut cur_mesh: Option<egui::Mesh> = None;
 
     for t in projected {
-        let (is_textured, target_mesh) = if let Some(idx) = t.tex_idx {
-            if idx < mesh_tex.len() && textures[idx].handle.is_some() {
-                (true, &mut mesh_tex[idx])
-            } else {
-                (false, &mut mesh_default)
+        let tex_id = t
+            .tex_idx
+            .and_then(|idx| textures.get(idx))
+            .and_then(|tex| tex.handle.as_ref())
+            .map(|h| h.id());
+
+        let is_textured = tex_id.is_some();
+
+        if cur_mesh.is_none() || cur_tex_id != tex_id {
+            if let Some(m) = cur_mesh.take() {
+                if !m.indices.is_empty() {
+                    painter.add(Shape::Mesh(m.into()));
+                }
             }
-        } else {
-            (false, &mut mesh_default)
-        };
+            cur_tex_id = tex_id;
+            cur_mesh = Some(match tex_id {
+                Some(id) => egui::Mesh::with_texture(id),
+                None => egui::Mesh::default(),
+            });
+        }
+
+        let target_mesh = cur_mesh.as_mut().unwrap();
 
         // For untextured triangles, always sample the solid white pixel in font atlas
         // Passing non-white UVs to mesh_default causes font atlas sampling (streaks/black faces)
@@ -733,26 +863,29 @@ pub fn render_avatar_3d_mesh(
         target_mesh.indices.push(base_idx + 2);
     }
 
-    // Render meshes to painter
-    for m in mesh_tex {
+    if let Some(m) = cur_mesh {
         if !m.indices.is_empty() {
             painter.add(Shape::Mesh(m.into()));
         }
-    }
-    if !mesh_default.indices.is_empty() {
-        painter.add(Shape::Mesh(mesh_default.into()));
     }
 }
 
 /// Render the complete avatar preview viewport with studio lighting, floor shadow,
 /// 2D/3D mode switch, camera reset, and click-and-drag 3D rotation grab.
+/// Returns `true` if the user clicked the Retry 3D button after a failed fetch.
 pub fn render_avatar_viewport(
     ui: &mut egui::Ui,
     state: &mut Avatar3DState,
     avatar_2d_url: Option<&str>,
     viewport_size: Vec2,
     dark_mode: bool,
-) {
+) -> bool {
+    let mut retry_clicked = false;
+    let model_default_yaw = state
+        .model
+        .as_ref()
+        .map(|m| m.default_yaw)
+        .unwrap_or(DEFAULT_YAW);
     let (rect, resp) = ui.allocate_exact_size(viewport_size, egui::Sense::click_and_drag());
     let painter = ui.painter_at(rect);
 
@@ -854,8 +987,8 @@ pub fn render_avatar_viewport(
     // 4. Mouse Grab & Drag interaction
     if resp.dragged() {
         let delta = resp.drag_delta();
-        state.yaw -= delta.x * 0.015;
-        state.pitch = (state.pitch + delta.y * 0.015).clamp(-0.75, 0.75);
+        state.yaw += delta.x * 0.015;
+        state.pitch = (state.pitch - delta.y * 0.015).clamp(-0.75, 0.75);
         // Automatically switch to 3D mode if dragged while in 2D and 3D model is loaded
         if !state.is_3d && has_3d_model {
             state.is_3d = true;
@@ -877,7 +1010,7 @@ pub fn render_avatar_viewport(
     }
 
     if resp.double_clicked() {
-        state.yaw = DEFAULT_YAW;
+        state.yaw = model_default_yaw;
         state.pitch = DEFAULT_PITCH;
         state.zoom = 1.0;
     }
@@ -985,13 +1118,13 @@ pub fn render_avatar_viewport(
         .min_size(Vec2::new(28.0, 28.0));
 
         if ui.add(reset_btn).on_hover_text("Reset Camera (Yaw & Pitch)").clicked() {
-            state.yaw = DEFAULT_YAW;
+            state.yaw = model_default_yaw;
             state.pitch = DEFAULT_PITCH;
             state.zoom = 1.0;
         }
     });
 
-    // 6. Loading indicator or status overlay in top-right
+    // 6. Loading indicator or Retry 3D overlay in top-right
     if state.loading {
         let loading_pos = Pos2::new(rect.right() - 84.0, rect.top() + 12.0);
         let mut ui_loading = ui.new_child(
@@ -1012,13 +1145,38 @@ pub fn render_avatar_viewport(
                     ui.label(egui::RichText::new("3D").size(11.0).strong());
                 });
             });
+    } else if state.model.is_none() && state.err.is_some() {
+        let retry_pos = Pos2::new(rect.right() - 96.0, rect.top() + 12.0);
+        let mut ui_retry = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(Rect::from_min_size(retry_pos, Vec2::new(84.0, 28.0))),
+        );
+        let retry_btn = egui::Button::new(
+            egui::RichText::new("Retry 3D")
+                .size(11.0)
+                .strong()
+                .color(Color32::WHITE),
+        )
+        .fill(Color32::from_rgb(200, 110, 40))
+        .corner_radius(12)
+        .min_size(Vec2::new(80.0, 24.0));
+        let hover = state.err.as_deref().unwrap_or("Retry 3D preview");
+        if ui_retry.add(retry_btn).on_hover_text(hover).clicked() {
+            retry_clicked = true;
+        }
     }
+
+    retry_clicked
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{shade_studio_vertex, Avatar3DState, DEFAULT_PITCH, DEFAULT_YAW};
+    use super::{
+        compute_manifest_default_yaw, parse_avatar_3d, shade_studio_vertex, Avatar3DState,
+        DEFAULT_PITCH, DEFAULT_YAW,
+    };
     use eframe::egui::Color32;
+    use serde_json::json;
 
     #[test]
     fn default_camera_faces_front_and_studio_lighting_has_contrast() {
@@ -1059,5 +1217,39 @@ mod tests {
             Some(Color32::from_rgb(20, 20, 22)),
         );
         assert!(dark_lit.r() > 50);
+    }
+
+    #[test]
+    fn parse_obj_aligns_flipped_winding_negative_indices_and_mtl_alpha() {
+        let mtl = b"newmtl Visor\nKd 0.8 0.4 0.2\nd 0.5\nmap_Kd -s 1 1 1 texhash123\nnewmtl HiddenCage\nKd 1.0 1.0 1.0\nd 0.0\n";
+        let obj = b"v 0 0 -1\nv 0 1 -1\nv 1 0 -1\nvt 0 0\nvt 0 1\nvt 1 0\nvn 0 0 -1\nusemtl Visor\nf -3/-3/-1 -1/-1/-1 -2/-2/-1\nusemtl HiddenCage\nf 1/1/1 2/2/1 3/3/1\n";
+        let model = parse_avatar_3d(obj, Some(mtl), &[]).expect("parse OBJ");
+        assert_eq!(model.triangles.len(), 1);
+        assert_eq!(model.texture_hashes, vec!["texhash123".to_string()]);
+        assert_eq!(model.triangles[0].texture_index, Some(0));
+        assert_eq!(model.triangles[0].base_color.a(), 128);
+        // Reversed vertex order must have been flipped to agree with vn = (0, 0, -1).
+        assert!(model.triangles[0].normal[2] < -0.9);
+    }
+
+    #[test]
+    fn compute_manifest_default_yaw_turns_camera_front_to_viewer() {
+        let back_cam = json!({
+            "camera": { "position": { "x": 0.0, "y": 103.0, "z": 5.0 } },
+            "aabb": { "min": { "x": -1.0, "y": 100.0, "z": -1.0 }, "max": { "x": 1.0, "y": 105.0, "z": 1.0 } }
+        });
+        let yaw_back = compute_manifest_default_yaw(&back_cam, [0.0; 3]);
+        assert!((yaw_back.abs() - std::f32::consts::PI).abs() < 1e-4);
+
+        let oblique = json!({
+            "camera": { "position": { "x": -2.0, "y": 104.0, "z": -4.0 } },
+            "aabb": { "min": { "x": -1.0, "y": 100.0, "z": -1.0 }, "max": { "x": 1.0, "y": 105.0, "z": 1.0 } }
+        });
+        let yaw_ob = compute_manifest_default_yaw(&oblique, [0.0; 3]);
+        let (dx, dz) = (-2.0f32, -4.0f32);
+        let rx = dx * yaw_ob.cos() + dz * yaw_ob.sin();
+        let rz = -dx * yaw_ob.sin() + dz * yaw_ob.cos();
+        assert!(rx.abs() < 1e-4);
+        assert!(rz < 0.0);
     }
 }

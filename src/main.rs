@@ -81,8 +81,8 @@ fn main() -> eframe::Result<()> {
 mod tests {
     use std::path::PathBuf;
     use crate::roblox_process::{
-        extract_active_place_id_from_log, inspect_player_log_text, parse_crash_handler_attachment,
-        LogSessionState,
+        extract_active_place_id_from_log, extract_player_exe_from_command,
+        inspect_player_log_text, parse_crash_handler_attachment, LogSessionState,
     };
 
     #[test]
@@ -141,5 +141,33 @@ mod tests {
                    2026-06-16T12:35:00Z,42.1,b1,6 [FLog::Output] ! Joining game '11111111-2222' place 2753915549 at 128.116.2.2";
         assert_eq!(extract_active_place_id_from_log(log), Some(2753915549));
         assert_eq!(extract_active_place_id_from_log("random text"), None);
+    }
+
+    #[test]
+    fn extracts_roblox_player_exe_from_registry_command() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustblox_player_cmd_test_{}",
+            std::process::id()
+        ));
+        let spaced = dir.join("Roblox Player");
+        let _ = std::fs::create_dir_all(&spaced);
+        let exe = spaced.join("RobloxPlayerBeta.exe");
+        let other = spaced.join("rustblox.exe");
+        std::fs::write(&exe, b"mz").expect("create test player exe");
+        std::fs::write(&other, b"mz").expect("create test non-player exe");
+
+        let quoted_cmd = format!("\"{}\" \"%1\"", exe.display());
+        assert_eq!(
+            extract_player_exe_from_command(&quoted_cmd),
+            Some(exe.clone())
+        );
+
+        let non_player_cmd = format!("\"{}\" \"%1\"", other.display());
+        assert_eq!(extract_player_exe_from_command(&non_player_cmd), None);
+
+        let missing_cmd = format!("\"{}\" \"%1\"", spaced.join("missing\\RobloxPlayerBeta.exe").display());
+        assert_eq!(extract_player_exe_from_command(&missing_cmd), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

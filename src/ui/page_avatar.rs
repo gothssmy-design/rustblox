@@ -192,13 +192,16 @@ impl RustBlox {
             // 1. Left Avatar Panel: ONLY the character viewport, large and centered, just like in Roblox!
             ui.vertical(|ui| {
                 ui.set_width(left_panel_w);
-                render_avatar_viewport(
+                if render_avatar_viewport(
                     ui,
                     &mut self.avatar_3d,
                     Some(&avatar_url),
                     egui::vec2(left_panel_w, left_h),
                     ui.visuals().dark_mode,
-                );
+                ) {
+                    self.avatar_3d.err = None;
+                    self.load_avatar_3d();
+                }
             });
 
             ui.add_space(16.0);

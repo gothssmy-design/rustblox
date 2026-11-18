@@ -33,19 +33,89 @@ use eframe::egui;
 
 pub const CMD_KEY: &str = r"Software\Classes\roblox-player\shell\open\command";
 
-pub fn find_player() -> Option<PathBuf> {
-    let base = PathBuf::from(env::var("LOCALAPPDATA").ok()?)
-        .join("Roblox")
-        .join("Versions");
-    let mut best: Option<(SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(base).ok()?.flatten() {
+pub fn extract_player_exe_from_command(cmd: &str) -> Option<PathBuf> {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let candidate = if let Some(after_quote) = trimmed.strip_prefix('"') {
+        after_quote.split('"').next().unwrap_or("")
+    } else {
+        trimmed.split_whitespace().next().unwrap_or("")
+    };
+    if candidate.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(candidate);
+    let is_player = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("RobloxPlayerBeta.exe"));
+    if is_player && path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn scan_versions_dir(versions_dir: &Path, best: &mut Option<(SystemTime, PathBuf)>) {
+    let Ok(entries) = fs::read_dir(versions_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
         let exe = entry.path().join("RobloxPlayerBeta.exe");
         if let Some(time) = fs::metadata(&exe).ok().and_then(|m| m.modified().ok()) {
             if best.as_ref().map_or(true, |(t, _)| time > *t) {
-                best = Some((time, exe));
+                *best = Some((time, exe));
             }
         }
     }
+}
+
+pub fn find_player() -> Option<PathBuf> {
+    let mut version_roots: Vec<PathBuf> = Vec::new();
+    for env_key in ["LOCALAPPDATA", "ProgramFiles(x86)", "ProgramFiles"] {
+        if let Ok(base) = env::var(env_key) {
+            let root = PathBuf::from(base).join("Roblox").join("Versions");
+            if !version_roots.contains(&root) {
+                version_roots.push(root);
+            }
+        }
+    }
+    if let Ok(profile) = env::var("USERPROFILE") {
+        let root = PathBuf::from(profile)
+            .join("AppData")
+            .join("Local")
+            .join("Roblox")
+            .join("Versions");
+        if !version_roots.contains(&root) {
+            version_roots.push(root);
+        }
+    }
+
+    let mut best: Option<(SystemTime, PathBuf)> = None;
+    for root in &version_roots {
+        scan_versions_dir(root, &mut best);
+    }
+
+    if best.is_none() {
+        for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+            let root = RegKey::predef(hive);
+            if let Ok(key) = root.open_subkey_with_flags(CMD_KEY, KEY_READ) {
+                if let Ok(cmd) = key.get_value::<String, _>("") {
+                    if let Some(path) = extract_player_exe_from_command(&cmd) {
+                        let time = fs::metadata(&path)
+                            .and_then(|m| m.modified())
+                            .unwrap_or(SystemTime::UNIX_EPOCH);
+                        if best.as_ref().map_or(true, |(t, _)| time > *t) {
+                            best = Some((time, path));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     best.map(|(_, path)| path)
 }
 
