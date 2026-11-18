@@ -3342,28 +3342,31 @@ impl RustBlox {
 }
 
 impl eframe::App for RustBlox {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.poll() {
-            ui.ctx().request_repaint();
+            ctx.request_repaint();
         }
         if self.pending_start_in_tray_frames > 0 {
             self.pending_start_in_tray_frames -= 1;
             if self.pending_start_in_tray_frames == 0 {
-                self.hide_to_tray(ui.ctx(), false);
+                self.hide_to_tray(ctx, false);
             } else {
-                ui.ctx().request_repaint();
+                ctx.request_repaint();
             }
         }
-        if ui.ctx().input(|i| i.viewport().close_requested())
+        if ctx.input(|i| i.viewport().close_requested())
             && !self.allow_close_exit
             && self.settings.tray_enabled
             && self.settings.tray_minimize_on_close
         {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             let show_tip = !self.tray_minimize_balloon_shown;
             self.tray_minimize_balloon_shown = true;
-            self.hide_to_tray(ui.ctx(), show_tip);
+            self.hide_to_tray(ctx, show_tip);
         }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if !self.update_checked {
             self.update_checked = true;
             self.check_updates(false);
@@ -4552,7 +4555,19 @@ impl eframe::App for RustBlox {
         }
     }
 
+    #[cfg(feature = "glow")]
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.on_exit_cleanup();
+    }
+
+    #[cfg(not(feature = "glow"))]
     fn on_exit(&mut self) {
+        self.on_exit_cleanup();
+    }
+}
+
+impl RustBlox {
+    fn on_exit_cleanup(&mut self) {
         self.watcher_stop.store(true, Ordering::Relaxed);
         self.auto_close_flag.store(false, Ordering::Relaxed);
         self.tray.shutdown();
@@ -4563,6 +4578,15 @@ impl eframe::App for RustBlox {
         if let Some(staged) = self.app_staged_patch.take() {
             launch_quiet_apply_on_exit(&staged);
         }
+    }
+}
+
+impl Drop for RustBlox {
+    fn drop(&mut self) {
+        self.watcher_stop.store(true, Ordering::Relaxed);
+        self.auto_close_flag.store(false, Ordering::Relaxed);
+        self.tray.shutdown();
+        self.discord_rpc.shutdown();
     }
 }
 

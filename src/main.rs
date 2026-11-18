@@ -6,6 +6,7 @@ mod auth;
 mod avatar_3d;
 mod discord_rpc;
 mod fastflags;
+mod graphics;
 mod roblox_process;
 mod telemetry;
 mod theme;
@@ -24,12 +25,17 @@ use auth::log;
 use roblox_process::launch_from_uri;
 
 fn main() -> eframe::Result<()> {
+    graphics::install_panic_and_log_hook();
     let args: Vec<String> = env::args().collect();
     if updater::try_run_quiet_apply_cli(&args) {
         return Ok(());
     }
     if let Some(u_args) = updater::try_parse_updater_cli(&args) {
-        return updater::run_updater_window(u_args);
+        let res = updater::run_updater_window(u_args);
+        if let Err(ref e) = res {
+            log(&format!("Updater window failed: {e}"));
+        }
+        return res;
     }
     updater::cleanup_old_binary();
     // Started by a roblox-player: link from the website? Launch the game and exit.
@@ -61,14 +67,14 @@ fn main() -> eframe::Result<()> {
         viewport,
         ..Default::default()
     };
-    eframe::run_native(
-        "rustblox",
-        options,
-        Box::new(move |cc| {
-            egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(RustBlox::new(cc, start_in_tray)))
-        }),
-    )
+    let res = graphics::run_native_with_fallback("rustblox", options, &args, move |cc| {
+        egui_extras::install_image_loaders(&cc.egui_ctx);
+        Ok(Box::new(RustBlox::new(cc, start_in_tray)))
+    });
+    if let Err(ref e) = res {
+        log(&format!("Startup aborted: {e}"));
+    }
+    res
 }
 
 #[cfg(test)]

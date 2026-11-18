@@ -839,16 +839,12 @@ pub fn run_updater_window(args: UpdaterArgs) -> eframe::Result<()> {
         centered: true,
         ..Default::default()
     };
-    eframe::run_native(
-        "Updating RustBlox",
-        options,
-        Box::new(move |cc| {
-            egui_extras::install_image_loaders(&cc.egui_ctx);
-            install_fonts(&cc.egui_ctx);
-            apply_theme(&cc.egui_ctx, &settings);
-            Ok(Box::new(RustBloxUpdaterApp::new(args)))
-        }),
-    )
+    crate::graphics::run_native_with_fallback("Updating RustBlox", options, &[], move |cc| {
+        egui_extras::install_image_loaders(&cc.egui_ctx);
+        install_fonts(&cc.egui_ctx);
+        apply_theme(&cc.egui_ctx, &settings);
+        Ok(Box::new(RustBloxUpdaterApp::new(args.clone())))
+    })
 }
 
 #[cfg(test)]

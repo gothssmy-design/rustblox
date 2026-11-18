@@ -18,10 +18,18 @@ pub fn data_dir() -> PathBuf {
 }
 
 pub fn log(msg: &str) {
+    let path = data_dir().join("log.txt");
+    if let Ok(meta) = fs::metadata(&path) {
+        if meta.len() > 256 * 1024 {
+            let old = data_dir().join("log.old.txt");
+            let _ = fs::remove_file(&old);
+            let _ = fs::rename(&path, &old);
+        }
+    }
     if let Ok(mut f) = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(data_dir().join("log.txt"))
+        .open(&path)
     {
         let _ = writeln!(f, "{}", msg);
     }
